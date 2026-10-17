@@ -1,0 +1,21 @@
+﻿{
+    "installed_at":  "2026-10-09T22:22:33.5834701+09:00",
+    "ai_backup":  "C:\\AI\\ai.ps1.backup_phase2_20261009_222233",
+    "phase":  "2",
+    "scripts":  [
+                    "jungle_security_gate_v1.ps1",
+                    "extract_docx_for_qa.ps1",
+                    "extract_xlsx_for_qa.ps1",
+                    "run_office_codex_qa_v1.ps1",
+                    "run_quality_triage_v2.ps1",
+                    "run_docx_auto_revision_v1.ps1",
+                    "run_xlsx_modify_v1.ps1",
+                    "run_xlsx_auto_revision_v1.ps1",
+                    "run_office_quality_pipeline_v1.ps1",
+                    "run_pptx_modify_quality_v1.ps1",
+                    "run_docx_modify_quality_v1.ps1",
+                    "run_docx_create_quality_v1.ps1",
+                    "run_xlsx_modify_quality_v1.ps1",
+                    "jungle_core_v5_phase2.ps1"
+                ]
+}

@@ -1,0 +1,35 @@
+﻿param(
+    [Parameter(Mandatory=$true)]
+    [string]$Request,
+
+    [Parameter(Mandatory=$true)]
+    [string]$ConfigPath,
+
+    [Parameter(Mandatory=$true)]
+    [string]$RunDirectory
+)
+
+$ErrorActionPreference =
+    "Stop"
+
+
+# JUNGLE_SMART_PPT_REFLOW_WORKER_V1
+
+$config =
+    Get-Content `
+        -LiteralPath $ConfigPath `
+        -Raw |
+    ConvertFrom-Json
+
+
+if (-not $config.feature_flags.reflow_v1) {
+
+    throw (
+        "REFLOW V1 Worker is disabled by feature flag."
+    )
+}
+
+
+throw (
+    "REFLOW V1 Worker scaffold only. Execution engine is not activated."
+)

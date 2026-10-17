@@ -1,0 +1,540 @@
+﻿param(
+    [Parameter(Mandatory=$true)]
+    [string]$InputJsonPath
+)
+
+$ErrorActionPreference =
+    "Stop"
+
+
+# ================================================================
+# JUNGLE_SMART_PPT_REFLOW_WORKER_V2
+#
+# JUNGLE_SMART_REFLOW_WORKER_PROTOCOL_V1
+# JUNGLE_SMART_REFLOW_LIVE_BLOCK_PENDING_HARD_GATE_V1
+#
+# Worker isolation for REFLOW.
+#
+# Current stage:
+# - Dry-run integration is allowed.
+# - Live executor invocation is BLOCKED until Hard Gate wiring.
+# ================================================================
+
+
+function Get-JungleWorkerStringSha256 {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+
+    $encoding =
+        New-Object System.Text.UTF8Encoding(
+            $false
+        )
+
+
+    $bytes =
+        $encoding.GetBytes(
+            $Text
+        )
+
+
+    $sha =
+        [System.Security.Cryptography.SHA256]::Create()
+
+
+    try {
+
+        $hashBytes =
+            $sha.ComputeHash(
+                $bytes
+            )
+    }
+    finally {
+
+        $sha.Dispose()
+    }
+
+
+    return (
+        -join (
+            $hashBytes |
+            ForEach-Object {
+
+                $_.ToString("x2")
+            }
+        )
+    ).ToUpperInvariant()
+}
+
+
+$resultPath =
+    $null
+
+
+try {
+
+    # ============================================================
+    # 1. INPUT
+    # ============================================================
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $InputJsonPath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "REFLOW worker input JSON missing: " +
+            $InputJsonPath
+        )
+    }
+
+
+    $inputText =
+        [System.IO.File]::ReadAllText(
+            $InputJsonPath
+        )
+
+
+    $inputData =
+        $inputText |
+        ConvertFrom-Json
+
+
+    if (
+        [string]$inputData.protocol -ne
+        "JUNGLE_SMART_REFLOW_WORKER_PROTOCOL_V1"
+    ) {
+
+        throw (
+            "Invalid REFLOW worker protocol."
+        )
+    }
+
+
+    $resultPath =
+        [string]$inputData.result_path
+
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $resultPath
+        )
+    ) {
+
+        throw (
+            "Worker result path missing."
+        )
+    }
+
+
+    $request =
+        [string]$inputData.request
+
+
+    $expectedRequestHash =
+        [string]$inputData.request_sha256
+
+
+    $actualRequestHash =
+        Get-JungleWorkerStringSha256 `
+            -Text $request
+
+
+    if (
+        $actualRequestHash -ne
+        $expectedRequestHash
+    ) {
+
+        throw (
+            "REFLOW worker request SHA256 mismatch."
+        )
+    }
+
+
+    $configPath =
+        [string]$inputData.config_path
+
+
+    $executorPath =
+        [string]$inputData.executor_path
+
+
+    $guardPath =
+        [string]$inputData.guard_path
+
+
+    $dryRun =
+        [bool]$inputData.dry_run
+
+
+    # ============================================================
+    # 2. CONFIG
+    # ============================================================
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $configPath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "REFLOW worker config missing."
+        )
+    }
+
+
+    $config =
+        Get-Content `
+            -LiteralPath $configPath `
+            -Raw |
+        ConvertFrom-Json
+
+
+    if (-not $config.feature_flags.reflow_v1) {
+
+        throw (
+            "REFLOW worker feature flag is OFF."
+        )
+    }
+
+
+    # ============================================================
+    # 3. EXECUTOR
+    # ============================================================
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $executorPath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "REFLOW executor missing: " +
+            $executorPath
+        )
+    }
+
+
+    $executorText =
+        [System.IO.File]::ReadAllText(
+            $executorPath
+        )
+
+
+    if (-not $executorText.Contains(
+        "JUNGLE_SMART_PPT_REFLOW_EXECUTOR_V1"
+    )) {
+
+        throw (
+            "REFLOW executor marker missing."
+        )
+    }
+
+
+    if (-not $executorText.Contains(
+        "JUNGLE_SMART_REFLOW_EXECUTOR_MUTATION_GUARD_V1"
+    )) {
+
+        throw (
+            "REFLOW executor Mutation Guard integration missing."
+        )
+    }
+
+
+    # ============================================================
+    # 4. GUARD
+    # ============================================================
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $guardPath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "REFLOW guard missing: " +
+            $guardPath
+        )
+    }
+
+
+    $guardText =
+        [System.IO.File]::ReadAllText(
+            $guardPath
+        )
+
+
+    if (-not $guardText.Contains(
+        "JUNGLE_SMART_REFLOW_MUTATION_BOUNDARY_V1"
+    )) {
+
+        throw (
+            "Mutation Boundary marker missing."
+        )
+    }
+
+
+    # ============================================================
+    # 5. SOURCE PATH
+    # ============================================================
+
+    $sourceMatch =
+        [regex]::Match(
+            $request,
+            '(?i)(?:"(?<p>[A-Z]:\\[^"]+?\.pptx?)"|''(?<p>[A-Z]:\\[^'']+?\.pptx?)''|(?<p>[A-Z]:\\.*?\.pptx?)(?=\s|$))'
+        )
+
+
+    if (-not $sourceMatch.Success) {
+
+        throw (
+            "REFLOW worker could not resolve source PPT path."
+        )
+    }
+
+
+    $sourcePath =
+        [string]$sourceMatch.Groups["p"].Value
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $sourcePath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "REFLOW worker source PPT missing: " +
+            $sourcePath
+        )
+    }
+
+
+    $sourceHash =
+        (
+            Get-FileHash `
+                -LiteralPath $sourcePath `
+                -Algorithm SHA256
+        ).Hash
+
+
+    # ============================================================
+    # 6. DRY RUN
+    # ============================================================
+
+    if ($dryRun) {
+
+        $result =
+            [ordered]@{
+
+                protocol =
+                    "JUNGLE_SMART_REFLOW_WORKER_RESULT_V1"
+
+                status =
+                    "REFLOW_DRY_RUN_READY"
+
+                accepted =
+                    $true
+
+                pipeline_complete =
+                    $false
+
+                live_execution =
+                    $false
+
+                executor_called =
+                    $false
+
+                ai_calls =
+                    0
+
+                com_calls =
+                    0
+
+                source_path =
+                    $sourcePath
+
+                source_sha256 =
+                    $sourceHash
+
+                executor_path =
+                    $executorPath
+
+                mutation_boundary =
+                    "READY"
+
+                hard_gate =
+                    "PENDING_INTEGRATION"
+
+                message =
+                    "Bridge/Worker/Executor integration is ready. Live REFLOW remains blocked."
+            }
+
+
+        $resultJson =
+            $result |
+            ConvertTo-Json -Depth 10
+
+
+        $encoding =
+            New-Object System.Text.UTF8Encoding(
+                $false
+            )
+
+
+        [System.IO.File]::WriteAllText(
+            $resultPath,
+            $resultJson,
+            $encoding
+        )
+
+
+        Write-Host "STATUS : JUNGLE_REFLOW_WORKER_DRY_RUN_READY"
+
+        exit 0
+    }
+
+
+    # ============================================================
+    # 7. LIVE EXECUTION SAFETY BLOCK
+    #
+    # DO NOT invoke REFLOW executor until independent visual QA
+    # and the unchanged Hard Gate are wired.
+    # ============================================================
+
+    $blockedResult =
+        [ordered]@{
+
+            protocol =
+                "JUNGLE_SMART_REFLOW_WORKER_RESULT_V1"
+
+            status =
+                "LIVE_BLOCKED_PENDING_HARD_GATE"
+
+            accepted =
+                $false
+
+            pipeline_complete =
+                $false
+
+            live_execution =
+                $false
+
+            executor_called =
+                $false
+
+            ai_calls =
+                0
+
+            com_calls =
+                0
+
+            source_path =
+                $sourcePath
+
+            source_sha256 =
+                $sourceHash
+
+            mutation_boundary =
+                "READY"
+
+            hard_gate =
+                "NOT_CONNECTED"
+
+            message =
+                "Live REFLOW execution is intentionally blocked until Hard Gate integration."
+        }
+
+
+    $blockedJson =
+        $blockedResult |
+        ConvertTo-Json -Depth 10
+
+
+    $encoding =
+        New-Object System.Text.UTF8Encoding(
+            $false
+        )
+
+
+    [System.IO.File]::WriteAllText(
+        $resultPath,
+        $blockedJson,
+        $encoding
+    )
+
+
+    Write-Host "STATUS : JUNGLE_REFLOW_LIVE_BLOCKED_PENDING_HARD_GATE"
+
+    exit 3
+}
+catch {
+
+    if (-not [string]::IsNullOrWhiteSpace(
+        $resultPath
+    )) {
+
+        try {
+
+            $failureResult =
+                [ordered]@{
+
+                    protocol =
+                        "JUNGLE_SMART_REFLOW_WORKER_RESULT_V1"
+
+                    status =
+                        "FAIL"
+
+                    accepted =
+                        $false
+
+                    pipeline_complete =
+                        $false
+
+                    live_execution =
+                        $false
+
+                    executor_called =
+                        $false
+
+                    ai_calls =
+                        0
+
+                    com_calls =
+                        0
+
+                    error =
+                        $_.Exception.Message
+                }
+
+
+            $failureJson =
+                $failureResult |
+                ConvertTo-Json -Depth 10
+
+
+            $encoding =
+                New-Object System.Text.UTF8Encoding(
+                    $false
+                )
+
+
+            [System.IO.File]::WriteAllText(
+                $resultPath,
+                $failureJson,
+                $encoding
+            )
+        }
+        catch {}
+    }
+
+
+    Write-Error $_.Exception.Message
+
+    exit 1
+}

@@ -1,0 +1,684 @@
+﻿# JUNGLE_SMART_REFLOW_MUTATION_BOUNDARY_V1
+#
+# Deterministic PPTX mutation boundary.
+#
+# REFLOW V1 allows visual re-layout while preserving:
+# - source file bytes
+# - slide count
+# - slide order
+# - text content
+# - group structure count
+#
+# Generic shape counts are intentionally NOT locked because
+# decorative elements may be added or removed during REFLOW.
+
+function Get-JungleSha256 {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path
+    )
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $Path `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "File does not exist: " +
+            $Path
+        )
+    }
+
+
+    return (
+        Get-FileHash `
+            -LiteralPath $Path `
+            -Algorithm SHA256
+    ).Hash
+}
+
+
+function Get-JungleStringSha256 {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+
+    $encoding =
+        New-Object System.Text.UTF8Encoding(
+            $false
+        )
+
+
+    $bytes =
+        $encoding.GetBytes(
+            $Text
+        )
+
+
+    $sha =
+        [System.Security.Cryptography.SHA256]::Create()
+
+
+    try {
+
+        $hashBytes =
+            $sha.ComputeHash(
+                $bytes
+            )
+    }
+    finally {
+
+        $sha.Dispose()
+    }
+
+
+    return (
+        -join (
+            $hashBytes |
+            ForEach-Object {
+                $_.ToString("x2")
+            }
+        )
+    ).ToUpperInvariant()
+}
+
+
+function Get-JungleZipEntryText {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        $Archive,
+
+        [Parameter(Mandatory=$true)]
+        [string]$EntryName
+    )
+
+
+    $entry =
+        $Archive.GetEntry(
+            $EntryName
+        )
+
+
+    if ($null -eq $entry) {
+
+        throw (
+            "PPTX ZIP entry missing: " +
+            $EntryName
+        )
+    }
+
+
+    $stream =
+        $entry.Open()
+
+
+    $reader =
+        New-Object System.IO.StreamReader(
+            $stream,
+            [System.Text.Encoding]::UTF8,
+            $true
+        )
+
+
+    try {
+
+        return $reader.ReadToEnd()
+    }
+    finally {
+
+        $reader.Dispose()
+        $stream.Dispose()
+    }
+}
+
+
+function Get-JungleReflowPptSnapshot {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path
+    )
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $Path `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "PPTX missing: " +
+            $Path
+        )
+    }
+
+
+    Add-Type `
+        -AssemblyName System.IO.Compression.FileSystem
+
+
+    $archive =
+        [System.IO.Compression.ZipFile]::OpenRead(
+            $Path
+        )
+
+
+    try {
+
+        $presentationText =
+            Get-JungleZipEntryText `
+                -Archive $archive `
+                -EntryName "ppt/presentation.xml"
+
+
+        $relsText =
+            Get-JungleZipEntryText `
+                -Archive $archive `
+                -EntryName "ppt/_rels/presentation.xml.rels"
+
+
+        [xml]$presentationXml =
+            $presentationText
+
+
+        [xml]$relsXml =
+            $relsText
+
+
+        $presentationNs =
+            New-Object System.Xml.XmlNamespaceManager(
+                $presentationXml.NameTable
+            )
+
+
+        $presentationNs.AddNamespace(
+            "p",
+            "http://schemas.openxmlformats.org/presentationml/2006/main"
+        )
+
+
+        $presentationNs.AddNamespace(
+            "r",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        )
+
+
+        $relationshipMap =
+            @{}
+
+
+        $relationshipNodes =
+            $relsXml.SelectNodes(
+                "/*[local-name()='Relationships']/*[local-name()='Relationship']"
+            )
+
+
+        foreach ($relationship in $relationshipNodes) {
+
+            $id =
+                [string]$relationship.Id
+
+
+            $target =
+                [string]$relationship.Target
+
+
+            if (
+                -not [string]::IsNullOrWhiteSpace(
+                    $id
+                )
+            ) {
+
+                $relationshipMap[$id] =
+                    $target
+            }
+        }
+
+
+        $slideIdNodes =
+            $presentationXml.SelectNodes(
+                "//p:sldIdLst/p:sldId",
+                $presentationNs
+            )
+
+
+        $slideParts =
+            @()
+
+
+        foreach ($slideId in $slideIdNodes) {
+
+            $relationshipId =
+                $slideId.GetAttribute(
+                    "id",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                )
+
+
+            if (-not $relationshipMap.ContainsKey(
+                $relationshipId
+            )) {
+
+                throw (
+                    "Slide relationship not found: " +
+                    $relationshipId
+                )
+            }
+
+
+            $target =
+                [string]$relationshipMap[$relationshipId]
+
+
+            $normalized =
+                $target.Replace(
+                    "\",
+                    "/"
+                )
+
+
+            while ($normalized.StartsWith(
+                "../"
+            )) {
+
+                $normalized =
+                    $normalized.Substring(
+                        3
+                    )
+            }
+
+
+            if ($normalized.StartsWith(
+                "/"
+            )) {
+
+                $normalized =
+                    $normalized.TrimStart(
+                        "/"
+                    )
+            }
+
+
+            if (-not $normalized.StartsWith(
+                "ppt/"
+            )) {
+
+                $normalized =
+                    "ppt/" +
+                    $normalized
+            }
+
+
+            $slideParts +=
+                $normalized
+        }
+
+
+        $slides =
+            @()
+
+
+        for (
+            $i = 0;
+            $i -lt $slideParts.Count;
+            $i++
+        ) {
+
+            $slidePart =
+                [string]$slideParts[$i]
+
+
+            $slideText =
+                Get-JungleZipEntryText `
+                    -Archive $archive `
+                    -EntryName $slidePart
+
+
+            [xml]$slideXml =
+                $slideText
+
+
+            $textNodes =
+                $slideXml.SelectNodes(
+                    "//*[local-name()='t' and namespace-uri()='http://schemas.openxmlformats.org/drawingml/2006/main']"
+                )
+
+
+            $textValues =
+                @()
+
+
+            foreach ($textNode in $textNodes) {
+
+                $textValues +=
+                    [string]$textNode.InnerText
+            }
+
+
+            $joinedText =
+                $textValues -join
+                ([char]0x001F)
+
+
+            $textHash =
+                Get-JungleStringSha256 `
+                    -Text $joinedText
+
+
+            $groupNodes =
+                $slideXml.SelectNodes(
+                    "//*[local-name()='grpSp' and namespace-uri()='http://schemas.openxmlformats.org/presentationml/2006/main']"
+                )
+
+
+            $slides +=
+                [pscustomobject]@{
+
+                    index =
+                        $i + 1
+
+                    part =
+                        $slidePart
+
+                    text_sha256 =
+                        $textHash
+
+                    text_item_count =
+                        $textValues.Count
+
+                    group_count =
+                        $groupNodes.Count
+                }
+        }
+
+
+        $orderSignature =
+            Get-JungleStringSha256 `
+                -Text (
+                    $slideParts -join
+                    "|"
+                )
+
+
+        return [pscustomobject]@{
+
+            protocol =
+                "JUNGLE_SMART_REFLOW_PPT_SNAPSHOT_V1"
+
+            path =
+                $Path
+
+            file_sha256 =
+                Get-JungleSha256 `
+                    -Path $Path
+
+            slide_count =
+                $slideParts.Count
+
+            slide_order_sha256 =
+                $orderSignature
+
+            slides =
+                $slides
+        }
+    }
+    finally {
+
+        $archive.Dispose()
+    }
+}
+
+
+function Compare-JungleReflowSnapshots {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        $SourceSnapshot,
+
+        [Parameter(Mandatory=$true)]
+        $ArtifactSnapshot
+    )
+
+
+    $violations =
+        @()
+
+
+    if (
+        [int]$SourceSnapshot.slide_count -ne
+        [int]$ArtifactSnapshot.slide_count
+    ) {
+
+        $violations +=
+            "SLIDE_COUNT_CHANGED"
+    }
+
+
+    if (
+        [string]$SourceSnapshot.slide_order_sha256 -ne
+        [string]$ArtifactSnapshot.slide_order_sha256
+    ) {
+
+        $violations +=
+            "SLIDE_ORDER_CHANGED"
+    }
+
+
+    $sourceSlides =
+        @(
+            $SourceSnapshot.slides
+        )
+
+
+    $artifactSlides =
+        @(
+            $ArtifactSnapshot.slides
+        )
+
+
+    $compareCount =
+        [Math]::Min(
+            $sourceSlides.Count,
+            $artifactSlides.Count
+        )
+
+
+    for (
+        $i = 0;
+        $i -lt $compareCount;
+        $i++
+    ) {
+
+        $sourceSlide =
+            $sourceSlides[$i]
+
+
+        $artifactSlide =
+            $artifactSlides[$i]
+
+
+        if (
+            [string]$sourceSlide.text_sha256 -ne
+            [string]$artifactSlide.text_sha256
+        ) {
+
+            $violations +=
+                (
+                    "TEXT_CHANGED_SLIDE_" +
+                    ($i + 1)
+                )
+        }
+
+
+        if (
+            [int]$sourceSlide.text_item_count -ne
+            [int]$artifactSlide.text_item_count
+        ) {
+
+            $violations +=
+                (
+                    "TEXT_STRUCTURE_CHANGED_SLIDE_" +
+                    ($i + 1)
+                )
+        }
+
+
+        if (
+            [int]$sourceSlide.group_count -ne
+            [int]$artifactSlide.group_count
+        ) {
+
+            $violations +=
+                (
+                    "GROUP_STRUCTURE_CHANGED_SLIDE_" +
+                    ($i + 1)
+                )
+        }
+    }
+
+
+    return [pscustomobject]@{
+
+        protocol =
+            "JUNGLE_SMART_REFLOW_MUTATION_COMPARE_V1"
+
+        passed =
+            ($violations.Count -eq 0)
+
+        violation_count =
+            $violations.Count
+
+        violations =
+            $violations
+    }
+}
+
+
+function Assert-JungleReflowMutationBoundary {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$ArtifactPath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$SourceHashBefore
+    )
+
+
+    $sourceFullPath =
+        [System.IO.Path]::GetFullPath(
+            $SourcePath
+        )
+
+
+    $artifactFullPath =
+        [System.IO.Path]::GetFullPath(
+            $ArtifactPath
+        )
+
+
+    if (
+        [string]::Equals(
+            $sourceFullPath,
+            $artifactFullPath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+
+        throw (
+            "REFLOW mutation boundary rejected source overwrite."
+        )
+    }
+
+
+    $sourceHashAfter =
+        Get-JungleSha256 `
+            -Path $SourcePath
+
+
+    if (
+        $sourceHashAfter -ne
+        $SourceHashBefore
+    ) {
+
+        throw (
+            "REFLOW mutation boundary rejected source modification."
+        )
+    }
+
+
+    $sourceSnapshot =
+        Get-JungleReflowPptSnapshot `
+            -Path $SourcePath
+
+
+    $artifactSnapshot =
+        Get-JungleReflowPptSnapshot `
+            -Path $ArtifactPath
+
+
+    $comparison =
+        Compare-JungleReflowSnapshots `
+            -SourceSnapshot $sourceSnapshot `
+            -ArtifactSnapshot $artifactSnapshot
+
+
+    if (-not [bool]$comparison.passed) {
+
+        throw (
+            "REFLOW mutation boundary rejected artifact. Violations=" +
+            (
+                @($comparison.violations) -join
+                ","
+            )
+        )
+    }
+
+
+    return [pscustomobject]@{
+
+        protocol =
+            "JUNGLE_SMART_REFLOW_MUTATION_BOUNDARY_RESULT_V1"
+
+        passed =
+            $true
+
+        source_preserved =
+            $true
+
+        source_sha256 =
+            $sourceHashAfter
+
+        artifact_sha256 =
+            [string]$artifactSnapshot.file_sha256
+
+        slide_count =
+            [int]$artifactSnapshot.slide_count
+
+        text_locked =
+            $true
+
+        slide_count_locked =
+            $true
+
+        slide_order_locked =
+            $true
+
+        group_structure_locked =
+            $true
+
+        violation_count =
+            0
+    }
+}

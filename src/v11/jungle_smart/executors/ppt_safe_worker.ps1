@@ -1,0 +1,894 @@
+﻿# JUNGLE_SMART_PPT_SAFE_WORKER_V2
+# JUNGLE_WORKER_PIPELINE_COMPLETION_GUARD_V1
+# JUNGLE_WORKER_ARTIFACT_DISCOVERY_V1
+
+param(
+    [string]$InputPath,
+
+    [string]$ResultPath,
+
+    [switch]$SelfTest,
+
+    [switch]$HangTest,
+
+    [switch]$ProtocolReadTest
+)
+
+$ErrorActionPreference =
+    "Stop"
+
+
+function Get-WorkerTextSha256 {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+
+    $sha =
+        [System.Security.Cryptography.SHA256]::Create()
+
+
+    try {
+
+        $bytes =
+            [System.Text.Encoding]::UTF8.GetBytes(
+                $Text
+            )
+
+
+        $hash =
+            $sha.ComputeHash(
+                $bytes
+            )
+
+
+        return (
+            [System.BitConverter]::ToString(
+                $hash
+            )
+        ).Replace(
+            "-",
+            ""
+        )
+    }
+    finally {
+
+        $sha.Dispose()
+    }
+}
+
+
+function Read-WorkerInput {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path
+    )
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $Path `
+            -PathType Leaf
+    )) {
+
+        throw "Worker input file missing: $Path"
+    }
+
+
+    # IMPORTANT:
+    # Do NOT use PowerShell 5.1 Get-Content default decoding.
+    # File.ReadAllText reads the UTF-8 protocol safely.
+    $text =
+        [System.IO.File]::ReadAllText(
+            $Path
+        )
+
+
+    if ([string]::IsNullOrWhiteSpace(
+        $text
+    )) {
+
+        throw "Worker input file is empty."
+    }
+
+
+    return (
+        $text |
+        ConvertFrom-Json
+    )
+}
+
+
+function Write-WorkerResult {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Status,
+
+        [bool]$PipelineComplete,
+
+        [string]$ArtifactPath,
+
+        [string]$Message
+    )
+
+
+    $record =
+        [ordered]@{
+
+            protocol =
+                "JUNGLE_SMART_PPT_SAFE_WORKER_RESULT_V2"
+
+            status =
+                $Status
+
+            pipeline_complete =
+                $PipelineComplete
+
+            artifact_path =
+                $ArtifactPath
+
+            message =
+                $Message
+
+            created_at =
+                (Get-Date).ToString("s")
+        }
+
+
+    $json =
+        $record |
+        ConvertTo-Json -Depth 5
+
+
+    $encoding =
+        New-Object System.Text.UTF8Encoding(
+            $true
+        )
+
+
+    [System.IO.File]::WriteAllText(
+        $Path,
+        $json,
+        $encoding
+    )
+}
+
+
+function Get-WorkerSourcePath {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Request
+    )
+
+
+    $match =
+        [regex]::Match(
+            $Request,
+            '(?i)(?:"(?<p>[A-Z]:\\[^"]+?\.pptx?)"|''(?<p>[A-Z]:\\[^'']+?\.pptx?)''|(?<p>[A-Z]:\\.*?\.pptx?)(?=\s|$))'
+        )
+
+
+    if (-not $match.Success) {
+
+        throw "Worker could not resolve source PPT path."
+    }
+
+
+    return (
+        [string]$match.Groups["p"].Value
+    ).Trim()
+}
+
+
+function Get-WorkerArtifactSnapshot {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$OutputDirectory
+    )
+
+
+    $baseName =
+        [System.IO.Path]::GetFileNameWithoutExtension(
+            $SourcePath
+        )
+
+
+    $prefix =
+        $baseName +
+        "_visual_v1_"
+
+
+    return [string[]]@(
+        Get-ChildItem `
+            -LiteralPath $OutputDirectory `
+            -Filter "*.pptx" `
+            -File `
+            -ErrorAction SilentlyContinue |
+        Where-Object {
+
+            $_.Name.StartsWith(
+                $prefix,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        } |
+        ForEach-Object {
+            $_.FullName
+        }
+    )
+}
+
+
+function Resolve-WorkerArtifact {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$BridgeLog,
+
+        [Parameter(Mandatory=$true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$OutputDirectory,
+
+        [string[]]$ExistingPaths = @()
+    )
+
+
+    # Method 1: known native marker.
+
+    $matches =
+        @(
+            [regex]::Matches(
+                $BridgeLog,
+                '(?im)\[NATIVE PPT\][^\r\n]*ARTIFACT[^\r\n]*?[:=]\s*["'']?(?<p>[A-Z]:\\[^\r\n"'']+?\.pptx)["'']?\s*$'
+            )
+        )
+
+
+    for (
+        $i = $matches.Count - 1;
+        $i -ge 0;
+        $i--
+    ) {
+
+        $candidate =
+            [string]$matches[$i].Groups["p"].Value
+
+
+        $candidate =
+            $candidate.Trim()
+
+
+        if (
+            Test-Path `
+                -LiteralPath $candidate `
+                -PathType Leaf
+        ) {
+
+            return $candidate
+        }
+    }
+
+
+    # Method 2:
+    # Pre/post path snapshot.
+    # No LastWriteTime dependency.
+
+    $after =
+        @(
+            Get-WorkerArtifactSnapshot `
+                -SourcePath $SourcePath `
+                -OutputDirectory $OutputDirectory
+        )
+
+
+    $new =
+        @(
+            $after |
+            Where-Object {
+                $_ -notin $ExistingPaths
+            }
+        )
+
+
+    if ($new.Count -eq 1) {
+
+        return [string]$new[0]
+    }
+
+
+    if ($new.Count -gt 1) {
+
+        throw (
+            "Worker artifact discovery ambiguous. " +
+            "Multiple new artifacts: " +
+            ($new -join " | ")
+        )
+    }
+
+
+    throw (
+        "Worker pipeline completed but no new PPT artifact could be resolved."
+    )
+}
+
+
+# ================================================================
+# SELF TEST
+# ================================================================
+
+if ($SelfTest) {
+
+    Write-Output "JUNGLE_WORKER_V2_SELFTEST_OK"
+    Write-Output "STATUS : JUNGLE_WORKER_V2_SELFTEST_PASS"
+
+    exit 0
+}
+
+
+# ================================================================
+# HANG TEST
+# ================================================================
+
+if ($HangTest) {
+
+    Start-Sleep `
+        -Seconds 10
+
+
+    exit 0
+}
+
+
+# ================================================================
+# PROTOCOL READ TEST
+#
+# Validates Unicode transport in a REAL PS 5.1 child process.
+# No AI call.
+# ================================================================
+
+if ($ProtocolReadTest) {
+
+    try {
+
+        if ([string]::IsNullOrWhiteSpace(
+            $InputPath
+        )) {
+
+            throw "ProtocolReadTest requires InputPath."
+        }
+
+
+        $input =
+            Read-WorkerInput `
+                -Path $InputPath
+
+
+        if (
+            [string]$input.protocol -ne
+            "JUNGLE_SMART_PPT_SAFE_WORKER_V2"
+        ) {
+
+            throw (
+                "Protocol mismatch: " +
+                [string]$input.protocol
+            )
+        }
+
+
+        $request =
+            [string]$input.request
+
+
+        $expectedHash =
+            [string]$input.request_sha256
+
+
+        $actualHash =
+            Get-WorkerTextSha256 `
+                -Text $request
+
+
+        $hashMatch =
+            (
+                $expectedHash -eq
+                $actualHash
+            )
+
+
+        Write-Output (
+            "REQUEST_SHA256 : " +
+            $actualHash
+        )
+
+
+        Write-Output (
+            "REQUEST_HASH_MATCH : " +
+            $hashMatch.ToString().ToUpperInvariant()
+        )
+
+
+        if (-not $hashMatch) {
+
+            throw "Unicode worker request hash mismatch."
+        }
+
+
+        Write-Output "STATUS : JUNGLE_WORKER_PROTOCOL_READ_PASS"
+
+        exit 0
+    }
+    catch {
+
+        Write-Error $_.Exception.Message
+
+        exit 1
+    }
+}
+
+
+# ================================================================
+# PRODUCTION EXECUTION
+# ================================================================
+
+try {
+
+    if ([string]::IsNullOrWhiteSpace(
+        $InputPath
+    )) {
+
+        throw "Worker InputPath is required."
+    }
+
+
+    if ([string]::IsNullOrWhiteSpace(
+        $ResultPath
+    )) {
+
+        throw "Worker ResultPath is required."
+    }
+
+
+    $input =
+        Read-WorkerInput `
+            -Path $InputPath
+
+
+    if (
+        [string]$input.protocol -ne
+        "JUNGLE_SMART_PPT_SAFE_WORKER_V2"
+    ) {
+
+        throw (
+            "Worker protocol mismatch: " +
+            [string]$input.protocol
+        )
+    }
+
+
+    $request =
+        [string]$input.request
+
+
+    $requestExpectedHash =
+        [string]$input.request_sha256
+
+
+    $requestActualHash =
+        Get-WorkerTextSha256 `
+            -Text $request
+
+
+    if (
+        $requestExpectedHash -ne
+        $requestActualHash
+    ) {
+
+        throw (
+            "Worker request SHA256 mismatch. " +
+            "Unicode transport integrity failed."
+        )
+    }
+
+
+    $configPath =
+        [string]$input.config_path
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $configPath `
+            -PathType Leaf
+    )) {
+
+        throw "Worker config missing: $configPath"
+    }
+
+
+    $root =
+        Split-Path `
+            -Parent `
+            (
+                Split-Path `
+                    -Parent `
+                    $MyInvocation.MyCommand.Path
+            )
+
+
+    $bridge =
+        Join-Path `
+            $root `
+            "executors\ppt_safe_bridge.ps1"
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $bridge `
+            -PathType Leaf
+    )) {
+
+        throw "PPT SAFE bridge missing: $bridge"
+    }
+
+
+    $sourcePath =
+        Get-WorkerSourcePath `
+            -Request $request
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $sourcePath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "Worker source PPT missing: " +
+            $sourcePath
+        )
+    }
+
+
+    $outputDirectory =
+        "C:\AI\work\output"
+
+
+    [string[]]$existingArtifacts =
+        @(
+            Get-WorkerArtifactSnapshot `
+                -SourcePath $sourcePath `
+                -OutputDirectory $outputDirectory
+        )
+
+
+    Write-Output "========================================"
+    Write-Output " JUNGLE SMART PPT SAFE WORKER V2"
+    Write-Output "========================================"
+    Write-Output ""
+
+    Write-Output "PROTOCOL        : JUNGLE_SMART_PPT_SAFE_WORKER_V2"
+    Write-Output "ISOLATED        : TRUE"
+    Write-Output "UNICODE SAFE    : TRUE"
+    Write-Output "REQUEST HASH    : PASS"
+    Write-Output ""
+
+
+    $bridgeLog =
+        (
+            & $bridge `
+                -Request $request `
+                -ConfigPath $configPath *>&1 |
+            Out-String
+        )
+
+
+    Write-Output $bridgeLog
+
+
+    # ============================================================
+    # HARD SUCCESS CONDITION
+    #
+    # JUNGLE_WORKER_SAFE_NOOP_V1
+    #
+    # Hard Gate is never weakened.
+    #
+    # VERIFIED:
+    #   Existing v3.2 verified completion marker required.
+    #
+    # SAFE_NOOP:
+    #   v3.2 returned NEEDS_REVIEW,
+    #   but output artifact is byte-identical to source.
+    #
+    # Changed artifact + NEEDS_REVIEW remains FAIL.
+    # ============================================================
+
+    $fastComplete =
+        (
+            $bridgeLog.Contains(
+                "STATUS: JUNGLE_FAST_VERIFIED_COMPLETE"
+            ) `
+            -or
+            $bridgeLog.Contains(
+                "STATUS : JUNGLE_FAST_VERIFIED_COMPLETE"
+            )
+        )
+
+
+    $normalComplete =
+        (
+            $bridgeLog.Contains(
+                "STATUS: JUNGLE_VERIFIED_COMPLETE"
+            ) `
+            -or
+            $bridgeLog.Contains(
+                "STATUS : JUNGLE_VERIFIED_COMPLETE"
+            )
+        )
+
+
+    $pipelineComplete =
+        (
+            $fastComplete `
+            -or
+            $normalComplete
+        )
+
+
+    $fastNeedsReview =
+        (
+            $bridgeLog.Contains(
+                "STATUS: JUNGLE_FAST_VERIFIED_NEEDS_REVIEW"
+            ) `
+            -or
+            $bridgeLog.Contains(
+                "STATUS : JUNGLE_FAST_VERIFIED_NEEDS_REVIEW"
+            )
+        )
+
+
+    $normalNeedsReview =
+        (
+            $bridgeLog.Contains(
+                "STATUS: JUNGLE_VERIFIED_NEEDS_REVIEW"
+            ) `
+            -or
+            $bridgeLog.Contains(
+                "STATUS : JUNGLE_VERIFIED_NEEDS_REVIEW"
+            )
+        )
+
+
+    $needsReview =
+        (
+            $fastNeedsReview `
+            -or
+            $normalNeedsReview
+        )
+
+
+    if (
+        -not $pipelineComplete `
+        -and
+        -not $needsReview
+    ) {
+
+        Write-WorkerResult `
+            -Path $ResultPath `
+            -Status "FAIL" `
+            -PipelineComplete $false `
+            -ArtifactPath "" `
+            -Message "Neither VERIFIED nor NEEDS_REVIEW completion state was observed."
+
+
+        throw (
+            "v3.2 ended without an accepted completion state."
+        )
+    }
+
+
+    $artifactPath =
+        Resolve-WorkerArtifact `
+            -BridgeLog $bridgeLog `
+            -SourcePath $sourcePath `
+            -OutputDirectory $outputDirectory `
+            -ExistingPaths $existingArtifacts
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $artifactPath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "Resolved Worker artifact does not exist: " +
+            $artifactPath
+        )
+    }
+
+
+    # ------------------------------------------------------------
+    # VERIFIED
+    # ------------------------------------------------------------
+
+    if ($pipelineComplete) {
+
+        Write-WorkerResult `
+            -Path $ResultPath `
+            -Status "PASS" `
+            -PipelineComplete $true `
+            -ArtifactPath $artifactPath `
+            -Message "Verified PPT SAFE pipeline completed."
+
+
+        Write-Output ""
+        Write-Output (
+            "[NATIVE PPT] ARTIFACT : " +
+            $artifactPath
+        )
+
+        Write-Output "STATUS : JUNGLE_PPT_SAFE_WORKER_PIPELINE_PASS"
+        Write-Output "STATUS : JUNGLE_PPT_SAFE_WORKER_COMPLETE"
+
+        exit 0
+    }
+
+
+    # ------------------------------------------------------------
+    # NEEDS_REVIEW
+    #
+    # Only SAFE_NOOP may be accepted here.
+    # ------------------------------------------------------------
+
+    $sourceSha =
+        (
+            Get-FileHash `
+                -LiteralPath $sourcePath `
+                -Algorithm SHA256
+        ).Hash
+
+
+    $artifactSha =
+        (
+            Get-FileHash `
+                -LiteralPath $artifactPath `
+                -Algorithm SHA256
+        ).Hash
+
+
+    $byteIdentical =
+        (
+            $sourceSha -eq
+            $artifactSha
+        )
+
+
+    if (-not $byteIdentical) {
+
+        Write-WorkerResult `
+            -Path $ResultPath `
+            -Status "FAIL" `
+            -PipelineComplete $false `
+            -ArtifactPath $artifactPath `
+            -Message "Hard Gate NEEDS_REVIEW and artifact differs from source."
+
+
+        throw (
+            "Hard Gate NEEDS_REVIEW with changed artifact. " +
+            "SAFE_NOOP is forbidden."
+        )
+    }
+
+
+    $safeNoopRecord =
+        [ordered]@{
+
+            protocol =
+                "JUNGLE_SMART_PPT_SAFE_WORKER_RESULT_V2"
+
+            status =
+                "SAFE_NOOP"
+
+            pipeline_complete =
+                $false
+
+            accepted =
+                $true
+
+            hard_gate_state =
+                "NEEDS_REVIEW"
+
+            byte_identical =
+                $true
+
+            source_path =
+                $sourcePath
+
+            artifact_path =
+                $artifactPath
+
+            source_sha256 =
+                $sourceSha
+
+            artifact_sha256 =
+                $artifactSha
+
+            message =
+                "No byte-level modification occurred. Hard Gate remains NEEDS_REVIEW; result accepted only as SAFE_NOOP."
+
+            created_at =
+                (Get-Date).ToString("s")
+        }
+
+
+    $safeNoopEncoding =
+        New-Object System.Text.UTF8Encoding(
+            $true
+        )
+
+
+    [System.IO.File]::WriteAllText(
+        $ResultPath,
+        (
+            $safeNoopRecord |
+            ConvertTo-Json -Depth 6
+        ),
+        $safeNoopEncoding
+    )
+
+
+    Write-Output ""
+    Write-Output (
+        "[NATIVE PPT] ARTIFACT : " +
+        $artifactPath
+    )
+
+    Write-Output "STATUS : JUNGLE_PPT_SAFE_WORKER_SAFE_NOOP"
+    Write-Output "STATUS : JUNGLE_PPT_SAFE_WORKER_COMPLETE"
+
+    exit 0
+}catch {
+
+    if (
+        -not [string]::IsNullOrWhiteSpace(
+            $ResultPath
+        )
+    ) {
+
+        if (-not (
+            Test-Path `
+                -LiteralPath $ResultPath `
+                -PathType Leaf
+        )) {
+
+            try {
+
+                Write-WorkerResult `
+                    -Path $ResultPath `
+                    -Status "FAIL" `
+                    -PipelineComplete $false `
+                    -ArtifactPath "" `
+                    -Message $_.Exception.Message
+            }
+            catch {}
+        }
+    }
+
+
+    Write-Error $_.Exception.Message
+
+    exit 1
+}

@@ -1,0 +1,13 @@
+﻿{
+    "installed_at":  "2026-10-10T16:18:37.2518995+09:00",
+    "profile_path":  {
+                         "value":  "C:\\Users\\Zephyrus G14\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1",
+                         "AllUsersAllHosts":  "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\profile.ps1",
+                         "AllUsersCurrentHost":  "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Microsoft.PowerShell_profile.ps1",
+                         "CurrentUserAllHosts":  "C:\\Users\\Zephyrus G14\\Documents\\WindowsPowerShell\\profile.ps1",
+                         "CurrentUserCurrentHost":  "C:\\Users\\Zephyrus G14\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
+                     },
+    "profile_backup":  "C:\\Users\\Zephyrus G14\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1.backup_jungle_lite_20261010_161837",
+    "entrypoint":  "C:\\AI\\jungle.ps1",
+    "default_mode":  "claude"
+}

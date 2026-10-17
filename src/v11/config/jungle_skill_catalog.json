@@ -1,0 +1,90 @@
+﻿{
+    "built_at":  "2026-10-10T17:20:04.7122920+09:00",
+    "count":  14,
+    "items":  [
+                  {
+                      "kind":  "CLAUDE_AGENT",
+                      "name":  "docs-writer-kr",
+                      "description":  "Use this agent when the user needs to create, write, or revise technical documents in Markdown format. This includes architecture documents, requirements specifications, design documents, technical guides, and any other structured documentation. The agent handles figure/table numbering, draw.io diagram rendering, and proper formatting conventions.\\\\n\\\\nExamples:\\\\n\\\\n- Example 1:\\\\n  user: \\\"프로젝트의 시스템 아키텍처 문서를 작성해줘\\\"\\\\n  assistant: \\\"시스템 아키텍처 문서를 작성하기 위해 docs-writer-kr 에이전트를 사용하겠습니다.\\\"\\\\n  \u003cTask",
+                      "path":  "C:\\Users\\Zephyrus G14\\.claude\\agents\\docs-writer-kr.md"
+                  },
+                  {
+                      "kind":  "CLAUDE_SKILL",
+                      "name":  "drawio-figure",
+                      "description":  "This skill should be used when the user asks to \"create a diagram\", \"draw a figure\", \"add diagram to document\", \"drawio figure 생성\", \"다이어그램 그려줘\", \"다이어그램 렌더링\", or needs to author draw.io XML (.drawio) files, convert them to SVG via the drawio CLI, and embed them in Markdown documents with proper captions.",
+                      "path":  "C:\\Users\\Zephyrus G14\\.claude\\skills\\drawio-figure\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CLAUDE_SKILL",
+                      "name":  "humanizer",
+                      "description":  "AI가 생성한 한국어 텍스트의 특징적인 패턴을 감지하고 자연스러운 인간의 글쓰기로 변환합니다. 과학적 언어학 연구(KatFishNet 논문, 94.88% AUC 정확도)에 기반합니다. 쉼표 과다, 띄어쓰기 경직성, 품사 다양성, AI 어휘 과용, 번역투(에 대해/통해/되어진다), 대명사 과다, 복수형 과다, 구조적 단조로움 등 40가지 패턴을 S1/S2/S3 심각도로 분석합니다. ChatGPT/Claude/Gemini가 생성한 한국어 텍스트를 자연스럽게 만들거나 LLM 출력에서 AI 흔적을 제거할 때 사용하세요.",
+                      "path":  "C:\\Users\\Zephyrus G14\\.claude\\skills\\humanizer\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CLAUDE_SKILL",
+                      "name":  "mermaid-figure",
+                      "description":  "LEGACY — use only when maintaining EXISTING .mmd figures in older documents. All NEW figures must be created with the drawio-figure skill instead. This skill should be used when the user asks to \"render mermaid diagram\", \"create SVG from mermaid\", \"기존 mermaid figure 수정\", or needs to convert existing .mmd files to SVG and embed them in Markdown documents.",
+                      "path":  "C:\\Users\\Zephyrus G14\\.claude\\skills\\mermaid-figure\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CLAUDE_SKILL",
+                      "name":  "typesafe-ai",
+                      "description":  "Build AI-powered software with TypeSafe: small units of AI intelligence you can use like programming primitives. Its System One models, including Jev, turn natural language and application state into typed judgments and probabilities that code can combine. Use when a feature needs programmable common sense, when brainstorming what AI could make possible in an app, or when an LLM prompt-and-parse step could become a structured decision. Applications include routing, ranking, extraction, verificat",
+                      "path":  "C:\\Users\\Zephyrus G14\\.claude\\skills\\typesafe-ai\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CODEX_SKILL",
+                      "name":  "design-taste-frontend",
+                      "description":  "Anti-slop frontend skill for landing pages, portfolios, and redesigns. The agent reads the brief, infers the right design direction, and ships interfaces that do not look templated. Real design systems when applicable, audit-first on redesigns, strict pre-flight check.",
+                      "path":  "C:\\Users\\Zephyrus G14\\.codex\\skills\\design-taste-frontend\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CODEX_SKILL",
+                      "name":  "doc-coauthoring",
+                      "description":  "Guide users through a structured workflow for co-authoring documentation. Use when user wants to write documentation, proposals, technical specs, decision docs, or similar structured content. This workflow helps users efficiently transfer context, refine content through iteration, and verify the doc works for readers. Trigger when user mentions writing docs, creating proposals, drafting specs, or similar documentation tasks.",
+                      "path":  "C:\\Users\\Zephyrus G14\\.codex\\skills\\doc-coauthoring\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CODEX_SKILL",
+                      "name":  "docs-writer-kr",
+                      "description":  "한국어 Markdown 기술 문서의 작성·수정·리뷰에 사용한다. 아키텍처, 요구사항 정의서, 설계 문서와 기술 가이드에 그림·표 번호, draw.io 다이어그램, Confluence 재배포 규칙을 적용한다.",
+                      "path":  "C:\\Users\\Zephyrus G14\\.codex\\skills\\docs-writer-kr\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CODEX_SKILL",
+                      "name":  "drawio-figure",
+                      "description":  "draw.io 그림을 Markdown 문서에 넣을 때 그림 식별자, A4 크기, 가운데 정렬, SVG 삽입과 원본 링크 규칙을 적용한다. 새 그림의 생성·검증·렌더링은 drawio-skill을 사용한다.",
+                      "path":  "C:\\Users\\Zephyrus G14\\.codex\\skills\\drawio-figure\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CODEX_SKILL",
+                      "name":  "drawio-skill",
+                      "description":  "Create, edit, synchronize, inspect, test, and publish editable draw.io diagrams. Use when the user explicitly requests draw.io/diagrams.net, needs a polished architecture, ERD, UML, sequence, C4, SysML, BPMN, network, swimlane, ML, or infrastructure diagram, wants code/IaC/SQL/OpenAPI/AsyncAPI/Protobuf/GraphQL converted into a diagram, or wants an existing diagram queried, reviewed, diffed, restyled, kept in sync, or made interactive. Prefer Mermaid/PlantUML elsewhere when the requested artifact",
+                      "path":  "C:\\Users\\Zephyrus G14\\.codex\\skills\\drawio-skill\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CODEX_SKILL",
+                      "name":  "humanizer",
+                      "description":  "|",
+                      "path":  "C:\\Users\\Zephyrus G14\\.codex\\skills\\humanizer\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CODEX_SKILL",
+                      "name":  "humanizer-kr",
+                      "description":  "Rewrite, edit, or review Korean text so it sounds natural, human, and source-grounded rather than AI-generated or translation-like. Use for Korean product copy, posts, emails, public notices, documentation, essays, proposals, scripts, and other drafts that need Korean-specific register control, plain-language discipline, removal of AI-writing tells, or voice matching from a user-provided Korean writing sample.",
+                      "path":  "C:\\Users\\Zephyrus G14\\.codex\\skills\\humanizer-kr\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CODEX_SKILL",
+                      "name":  "impeccable",
+                      "description":  "Use when the user wants to design, redesign, shape, critique, audit, polish, clarify, distill, harden, optimize, adapt, animate, colorize, extract, or otherwise improve a frontend interface. Covers websites, landing pages, dashboards, product UI, app shells, components, forms, settings, onboarding, and empty states. Handles UX review, visual hierarchy, information architecture, cognitive load, accessibility, performance, responsive behavior, theming, anti-patterns, typography, fonts, spacing, la",
+                      "path":  "C:\\Users\\Zephyrus G14\\.codex\\skills\\impeccable\\SKILL.md"
+                  },
+                  {
+                      "kind":  "CODEX_SKILL",
+                      "name":  "mermaid-figure",
+                      "description":  "LEGACY — use only when maintaining EXISTING .mmd figures in older documents. All NEW figures must be created with the drawio-figure skill instead. This skill should be used when the user asks to \"render mermaid diagram\", \"create SVG from mermaid\", \"기존 mermaid figure 수정\", or needs to convert existing .mmd files to SVG and embed them in Markdown documents.",
+                      "path":  "C:\\Users\\Zephyrus G14\\.codex\\skills\\mermaid-figure\\SKILL.md"
+                  }
+              ]
+}

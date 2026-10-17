@@ -1,0 +1,22 @@
+﻿{
+    "installed_at":  "2026-10-10T16:35:11.9162683+09:00",
+    "source_root":  "C:\\Users\\Zephyrus G14\\Documents\\스킬",
+    "claude_global":  "C:\\Users\\Zephyrus G14\\.claude",
+    "installed_agents":  [
+                             "docs-writer-kr"
+                         ],
+    "installed_skills":  [
+                             "drawio-figure",
+                             "humanizer",
+                             "mermaid-figure",
+                             "synced",
+                             "typesafe-ai"
+                         ],
+    "capabilities":  {
+                         "drawio_cli":  true,
+                         "mmdc":  false,
+                         "python":  true
+                     },
+    "jungle_backup":  "C:\\AI\\jungle.ps1.backup_skill_layer_20261010_163511",
+    "skill_backup_root":  "C:\\AI\\skill_backups\\20261010_163511"
+}

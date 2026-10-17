@@ -1,0 +1,156 @@
+﻿# JUNGLE_SMART_PPT_SAFE_WORKER_V1
+
+param(
+    [string]$InputPath,
+
+    [switch]$SelfTest,
+
+    [switch]$HangTest
+)
+
+$ErrorActionPreference =
+    "Stop"
+
+
+if ($SelfTest) {
+
+    Write-Output "JUNGLE_WORKER_SELFTEST_OK"
+    Write-Output "STATUS : JUNGLE_WORKER_SELFTEST_PASS"
+
+    exit 0
+}
+
+
+if ($HangTest) {
+
+    Start-Sleep `
+        -Seconds 10
+
+
+    Write-Output "JUNGLE_WORKER_HANG_TEST_SHOULD_NOT_COMPLETE"
+
+    exit 0
+}
+
+
+if ([string]::IsNullOrWhiteSpace(
+    $InputPath
+)) {
+
+    Write-Error "Worker InputPath is required."
+
+    exit 2
+}
+
+
+if (-not (
+    Test-Path `
+        -LiteralPath $InputPath `
+        -PathType Leaf
+)) {
+
+    Write-Error "Worker input file missing: $InputPath"
+
+    exit 3
+}
+
+
+try {
+
+    $input =
+        Get-Content `
+            -LiteralPath $InputPath `
+            -Raw |
+        ConvertFrom-Json
+
+
+    if (
+        [string]$input.protocol -ne
+        "JUNGLE_SMART_PPT_SAFE_WORKER_V1"
+    ) {
+
+        throw (
+            "Worker protocol mismatch: " +
+            [string]$input.protocol
+        )
+    }
+
+
+    $request =
+        [string]$input.request
+
+
+    $configPath =
+        [string]$input.config_path
+
+
+    if ([string]::IsNullOrWhiteSpace(
+        $request
+    )) {
+
+        throw "Worker request is empty."
+    }
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $configPath `
+            -PathType Leaf
+    )) {
+
+        throw "Worker config missing: $configPath"
+    }
+
+
+    $root =
+        Split-Path `
+            -Parent `
+            (
+                Split-Path `
+                    -Parent `
+                    $MyInvocation.MyCommand.Path
+            )
+
+
+    $bridge =
+        Join-Path `
+            $root `
+            "executors\ppt_safe_bridge.ps1"
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $bridge `
+            -PathType Leaf
+    )) {
+
+        throw "PPT SAFE bridge missing: $bridge"
+    }
+
+
+    Write-Output "========================================"
+    Write-Output " JUNGLE SMART PPT SAFE WORKER"
+    Write-Output "========================================"
+    Write-Output ""
+
+    Write-Output "PROTOCOL : JUNGLE_SMART_PPT_SAFE_WORKER_V1"
+    Write-Output "ISOLATED : TRUE"
+    Write-Output ""
+
+
+    & $bridge `
+        -Request $request `
+        -ConfigPath $configPath
+
+
+    Write-Output ""
+    Write-Output "STATUS : JUNGLE_PPT_SAFE_WORKER_COMPLETE"
+
+    exit 0
+}
+catch {
+
+    Write-Error $_.Exception.Message
+
+    exit 1
+}

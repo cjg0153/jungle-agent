@@ -1,0 +1,55 @@
+function Get-JungleRoute {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Request,
+
+        [Parameter(Mandatory=$true)]
+        [object]$Config
+    )
+
+    $isPpt =
+        [regex]::IsMatch(
+            $Request,
+            '(?i)(\.pptx?|\bppt\b|powerpoint|파워포인트)'
+        )
+
+    $visualIntent =
+        [regex]::IsMatch(
+            $Request,
+            '(?i)(design|layout|visual|style|format|align|spacing|디자인|레이아웃|시각|정돈|정렬|간격|임원보고)'
+        )
+
+    if ($isPpt -and $visualIntent) {
+
+        return [pscustomobject]@{
+
+            route =
+                "PPT_SAFE"
+
+            provider =
+                "CLAUDE"
+
+            mode =
+                "SAFE"
+
+            reason =
+                "PPT visual intent detected."
+        }
+    }
+
+    return [pscustomobject]@{
+
+        route =
+            "GENERAL_AI"
+
+        provider =
+            "AUTO"
+
+        mode =
+            "AUTO"
+
+        reason =
+            "No hard-coded specialist route required."
+    }
+}
