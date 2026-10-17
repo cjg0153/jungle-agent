@@ -6,7 +6,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.1"
+$Version = "0.2"
 
 $RuntimeRoot = "C:\AI\Jungle\runtime\watchdog"
 $LogRoot     = "C:\AI\Jungle\logs\watchdog"
@@ -110,6 +110,35 @@ function Get-ServiceHealth {
     }
 }
 
+function Test-JungleProcessIdentity {
+    param(
+        [int]$ProcessId,
+        [string]$ExpectedScript
+    )
+
+    try {
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+
+        if ($null -eq $p) {
+            return $false
+        }
+
+        $commandLine = [string]$p.CommandLine
+
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            return $false
+        }
+
+        return $commandLine.IndexOf(
+            $ExpectedScript,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -ge 0
+    }
+    catch {
+        return $false
+    }
+}
+
 function Start-JungleService {
     param($Service)
 
@@ -183,8 +212,17 @@ try {
                     $null -ne $health.PID -and
                     $health.Reason -eq "HEARTBEAT_STALE"
                 ) {
-                    Stop-Process -Id $health.PID -Force -ErrorAction SilentlyContinue
-                    Write-WatchdogLog "KILL service=$($service.Name) pid=$($health.PID)"
+                    $identityMatch = Test-JungleProcessIdentity `
+                        -ProcessId $health.PID `
+                        -ExpectedScript $service.Script
+
+                    if ($identityMatch) {
+                        Stop-Process -Id $health.PID -Force -ErrorAction SilentlyContinue
+                        Write-WatchdogLog "KILL service=$($service.Name) pid=$($health.PID) identity=VERIFIED"
+                    }
+                    else {
+                        Write-WatchdogLog "KILL_SKIPPED service=$($service.Name) pid=$($health.PID) reason=IDENTITY_MISMATCH"
+                    }
                 }
 
                 [void](Start-JungleService $service)
@@ -256,3 +294,4 @@ finally {
         $mutex.Dispose()
     }
 }
+
