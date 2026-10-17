@@ -1,0 +1,43 @@
+﻿function Get-JungleFileHash {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path
+    )
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $Path `
+            -PathType Leaf
+    )) {
+
+        throw "File not found: $Path"
+    }
+
+    return (
+        Get-FileHash `
+            -LiteralPath $Path `
+            -Algorithm SHA256
+    ).Hash
+}
+
+
+function Test-JungleSourcePreserved {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path,
+
+        [Parameter(Mandatory=$true)]
+        [string]$OriginalHash
+    )
+
+    $currentHash =
+        Get-JungleFileHash `
+            -Path $Path
+
+    return (
+        $currentHash -eq
+        $OriginalHash
+    )
+}

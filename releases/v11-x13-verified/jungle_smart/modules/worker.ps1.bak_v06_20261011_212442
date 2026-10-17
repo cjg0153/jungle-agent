@@ -1,0 +1,14 @@
+﻿function Get-JungleWorkerStatus {
+
+    return [pscustomobject]@{
+
+        protocol =
+            "LOCAL"
+
+        isolation =
+            $false
+
+        status =
+            "BASELINE"
+    }
+}

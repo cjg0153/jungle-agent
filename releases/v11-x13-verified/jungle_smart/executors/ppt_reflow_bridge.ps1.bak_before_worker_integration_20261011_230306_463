@@ -1,0 +1,84 @@
+﻿param(
+    [Parameter(Mandatory=$true)]
+    [string]$Request,
+
+    [Parameter(Mandatory=$true)]
+    [string]$ConfigPath
+)
+
+$ErrorActionPreference =
+    "Stop"
+
+
+# JUNGLE_SMART_PPT_REFLOW_BRIDGE_V1
+
+$config =
+    Get-Content `
+        -LiteralPath $ConfigPath `
+        -Raw |
+    ConvertFrom-Json
+
+
+if (-not $config.feature_flags.reflow_v1) {
+
+    throw (
+        "REFLOW V1 execution is disabled by feature flag."
+    )
+}
+
+
+$root =
+    Split-Path `
+        -Parent (
+            Split-Path `
+                -Parent $MyInvocation.MyCommand.Path
+        )
+
+
+$contractPath =
+    Join-Path `
+        $root `
+        "modules\reflow_contract.ps1"
+
+
+if (-not (
+    Test-Path `
+        -LiteralPath $contractPath `
+        -PathType Leaf
+)) {
+
+    throw (
+        "REFLOW contract missing: " +
+        $contractPath
+    )
+}
+
+
+. $contractPath
+
+
+$contract =
+    Get-JungleReflowContract
+
+
+Write-Output ""
+Write-Output "========================================"
+Write-Output " JUNGLE PPT REFLOW BRIDGE V1"
+Write-Output "========================================"
+Write-Output ""
+
+Write-Output "Provider           : CLAUDE"
+Write-Output "Mode               : REFLOW"
+Write-Output "Text locked        : True"
+Write-Output "Slide count locked : True"
+Write-Output "Source overwrite   : False"
+Write-Output "Group/Ungroup      : False"
+Write-Output "Hard Gate          : UNCHANGED"
+Write-Output ""
+
+Write-Output "STATUS : JUNGLE_PPT_REFLOW_BRIDGE_SCAFFOLD_READY"
+
+
+throw (
+    "REFLOW V1 scaffold only. Execution engine is not activated."
+)

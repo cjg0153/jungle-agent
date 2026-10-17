@@ -1,0 +1,42 @@
+﻿function New-JungleRunContext {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Root,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Request
+    )
+
+    $stamp =
+        Get-Date -Format "yyyyMMdd_HHmmss"
+
+    $runId =
+        "run_" + $stamp
+
+    $runDir =
+        Join-Path `
+            (Join-Path $Root "runs") `
+            $runId
+
+    New-Item `
+        -ItemType Directory `
+        -Path $runDir `
+        -Force |
+    Out-Null
+
+    return [pscustomobject]@{
+
+        run_id =
+            $runId
+
+        run_dir =
+            $runDir
+
+        request =
+            $Request
+
+        created_at =
+            (Get-Date).ToString("s")
+    }
+}

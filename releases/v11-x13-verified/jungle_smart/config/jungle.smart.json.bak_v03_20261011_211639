@@ -1,0 +1,29 @@
+{
+    "name":  "Jungle Smart",
+    "version":  "0.3.0",
+    "phase":  "B",
+    "philosophy":  "Minimal routing, maximum AI autonomy, strict safety and verification.",
+    "stable_candidate":  "C:\\AI\\stable_candidates\\Jungle_v32_SAFE_CANDIDATE_R2_20261011_185738",
+    "ppt_safe_runner":  "C:\\AI\\run_verified_text_v3_2_hybrid.ps1",
+    "feature_flags":  {
+                          "router":  true,
+                          "execution_enabled":  true,
+                          "deterministic_g1":  true,
+                          "changed_scope":  false,
+                          "watchdog":  false,
+                          "blind_pairwise_qa":  false,
+                          "reflow_v1":  false,
+                          "worker_protocol":  false
+                      },
+    "policy":  {
+                   "source_overwrite":  false,
+                   "hard_gate_required":  true,
+                   "ppt_visual_provider":  "CLAUDE",
+                   "general_provider":  "AUTO",
+                   "default_mode":  "SAFE"
+               },
+    "limits":  {
+                   "max_ai_calls":  2,
+                   "timeout_seconds":  1800
+               }
+}

@@ -1,0 +1,276 @@
+{
+  "version": "1.0",
+  "name": "Jungle Routing",
+
+  "defaults": {
+    "jev_model": "jev-latest",
+    "codex_model": "gpt-6-astra",
+    "codex_reasoning": "medium",
+    "codex_reasoning_hard": "xhigh",
+    "claude_mode": "default",
+    "confidence_threshold": 0.75
+  },
+
+  "security": {
+    "security_gate_enabled": true,
+    "send_original_file_to_jev": false,
+    "send_attachment_content_to_jev": false,
+    "send_sensitive_text_to_jev": false,
+    "jev_receives_abstracted_request_only": true,
+    "bypass_jev_on_sensitive_input": true,
+    "sensitive_examples": [
+      "고객 개인정보",
+      "계좌번호",
+      "주민등록번호",
+      "비밀번호",
+      "인증정보",
+      "내부 비공개 원문",
+      "미공개 재무정보"
+    ]
+  },
+
+  "workflows": {
+    "BRIEF": {
+      "description": "임원 보고, 보고서, 브리프, PPT",
+      "primary": "claude",
+      "secondary": "codex",
+      "web_search": false,
+      "quality_priority": "high",
+      "qa_skills": [
+        "ax-deliverables",
+        "humanizer-kr"
+      ]
+    },
+
+    "REVIEW": {
+      "description": "문서 검토, 피드백, QA",
+      "primary": "codex",
+      "secondary": "claude",
+      "web_search": false,
+      "quality_priority": "high",
+      "qa_skills": [
+        "ax-deliverables",
+        "humanizer-kr"
+      ]
+    },
+
+    "RESEARCH": {
+      "description": "외부 자료 검색, 사례 조사, 최신 정보 조사",
+      "primary": "codex",
+      "secondary": "claude",
+      "web_search": true,
+      "quality_priority": "high",
+      "qa_skills": [
+        "ax-deliverables"
+      ]
+    },
+
+    "COMPLY": {
+      "description": "규제, 법률, 보안, 컴플라이언스",
+      "primary": "claude",
+      "secondary": "codex",
+      "web_search": true,
+      "quality_priority": "high",
+      "qa_skills": [
+        "ax-deliverables"
+      ]
+    },
+
+    "MEETING": {
+      "description": "회의록, 회의 정리, 액션아이템",
+      "primary": "claude",
+      "secondary": "codex",
+      "web_search": false,
+      "quality_priority": "normal",
+      "qa_skills": [
+        "humanizer-kr"
+      ]
+    },
+
+    "MESSAGE": {
+      "description": "이메일, 메신저, 공지문",
+      "primary": "claude",
+      "secondary": "codex",
+      "web_search": false,
+      "quality_priority": "normal",
+      "qa_skills": [
+        "humanizer-kr"
+      ]
+    },
+
+    "EDU": {
+      "description": "교육자료, 설명자료, 학습 콘텐츠",
+      "primary": "claude",
+      "secondary": "codex",
+      "web_search": false,
+      "quality_priority": "high",
+      "qa_skills": [
+        "ax-deliverables",
+        "humanizer-kr"
+      ]
+    },
+
+    "MOTION": {
+      "description": "모션그래픽, 움직이는 HTML, 발표 영상",
+      "primary": "claude",
+      "secondary": "codex",
+      "web_search": false,
+      "quality_priority": "high",
+      "qa_skills": [
+        "ax-deliverables"
+      ]
+    },
+
+    "PROTOTYPE": {
+      "description": "웹 프로토타입, 목업, UI 구현",
+      "primary": "claude",
+      "secondary": "codex",
+      "web_search": false,
+      "quality_priority": "high",
+      "qa_skills": [
+        "ax-deliverables"
+      ]
+    },
+
+    "DATA": {
+      "description": "엑셀, CSV, 데이터 가공 및 분석",
+      "primary": "codex",
+      "secondary": "claude",
+      "web_search": false,
+      "quality_priority": "normal",
+      "qa_skills": [
+        "ax-deliverables"
+      ]
+    },
+
+    "SYSTEM": {
+      "description": "코드, 자동화, CLI, 시스템 구축",
+      "primary": "codex",
+      "secondary": "claude",
+      "web_search": false,
+      "quality_priority": "normal",
+      "qa_skills": []
+    },
+
+    "OTHER": {
+      "description": "기타 업무",
+      "primary": "claude",
+      "secondary": "codex",
+      "web_search": false,
+      "quality_priority": "normal",
+      "qa_skills": []
+    }
+  },
+
+  "artifact_handlers": {
+    "XLSX": {
+      "content_engine": "codex",
+      "file_executor": "jungle_local",
+      "local_method": "excel_com",
+      "preserve_format": true,
+      "preserve_formulas": true
+    },
+
+    "PPTX": {
+      "content_engine": "claude",
+      "file_executor": "claude",
+      "final_qa": "codex",
+      "preserve_source_design": true
+    },
+
+    "DOCX": {
+      "content_engine": "claude",
+      "final_qa": "codex"
+    },
+
+    "PDF": {
+      "content_engine": "claude",
+      "final_qa": "codex"
+    },
+
+    "HTML": {
+      "content_engine": "claude",
+      "implementation_engine": "codex"
+    },
+
+    "MD": {
+      "content_engine": "claude",
+      "final_qa": "codex"
+    },
+
+    "TEXT": {
+      "content_engine": "claude",
+      "final_qa": "codex"
+    },
+
+    "NONE": {
+      "content_engine": "auto"
+    }
+  },
+
+  "special_routes": [
+    {
+      "workflow": "RESEARCH",
+      "artifact": "XLSX",
+      "steps": [
+        "codex_live_research",
+        "save_structured_json",
+        "jungle_excel_com",
+        "codex_data_qa"
+      ]
+    },
+
+    {
+      "workflow": "RESEARCH",
+      "artifact": "PPTX",
+      "steps": [
+        "codex_live_research",
+        "claude_storyline",
+        "claude_ppt_creation",
+        "codex_final_qa"
+      ]
+    },
+
+    {
+      "workflow": "BRIEF",
+      "artifact": "PPTX",
+      "steps": [
+        "claude_draft",
+        "codex_ax_qa",
+        "codex_humanizer_qa",
+        "claude_revision"
+      ]
+    },
+
+    {
+      "workflow": "MOTION",
+      "artifact": "HTML",
+      "steps": [
+        "claude_storyboard",
+        "claude_motion_design",
+        "codex_implementation_qa"
+      ]
+    },
+
+    {
+      "workflow": "PROTOTYPE",
+      "artifact": "HTML",
+      "steps": [
+        "claude_ux_design",
+        "codex_implementation",
+        "claude_final_review"
+      ]
+    }
+  ],
+
+  "qa": {
+    "important_output_requires_qa": true,
+    "do_not_rewrite_verified_facts": true,
+    "unsupported_numbers": "flag",
+    "unsupported_dates": "flag",
+    "unsupported_roi": "flag",
+    "unknown_values": "[확인 필요]",
+    "prefer_source_grounded_language": true,
+    "avoid_ai_like_korean": true
+  }
+}

@@ -1,0 +1,32 @@
+﻿function Test-JungleProcessAlive {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [int]$ProcessId
+    )
+
+    $process =
+        Get-Process `
+            -Id $ProcessId `
+            -ErrorAction SilentlyContinue
+
+    return (
+        $null -ne $process
+    )
+}
+
+
+function Get-JungleWatchdogStatus {
+
+    return [pscustomobject]@{
+
+        enabled =
+            $false
+
+        version =
+            "V0"
+
+        status =
+            "NOT_ACTIVATED"
+    }
+}

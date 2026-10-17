@@ -1,0 +1,3297 @@
+﻿param(
+    [Parameter(Mandatory=$true)]
+    [string]$InputJsonPath
+)
+
+$ErrorActionPreference =
+    "Stop"
+
+
+# ================================================================
+# JUNGLE_SMART_PPT_REFLOW_WORKER_V3
+#
+# JUNGLE_SMART_REFLOW_WORKER_PROTOCOL_V2
+# JUNGLE_SMART_REFLOW_HARD_GATE_WIRING_V1
+#
+# LIVE FLOW
+#
+# 1. REFLOW Executor
+# 2. Mutation Boundary
+# 3. Changed Scope
+# 4. Selective Visual QA decision
+# 5. Blind Pairwise regression QA
+# 6. Existing PPT Visual Re-QA scorer
+# 7. Test-JungleHardGate
+#
+# Fail closed:
+# rejected changed artifacts are deleted.
+# ================================================================
+
+
+function Get-JungleWorkerStringSha256 {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+
+    $encoding =
+        New-Object System.Text.UTF8Encoding(
+            $false
+        )
+
+
+    $bytes =
+        $encoding.GetBytes(
+            $Text
+        )
+
+
+    $sha =
+        [System.Security.Cryptography.SHA256]::Create()
+
+
+    try {
+
+        $hashBytes =
+            $sha.ComputeHash(
+                $bytes
+            )
+    }
+    finally {
+
+        $sha.Dispose()
+    }
+
+
+    return (
+        -join (
+            $hashBytes |
+            ForEach-Object {
+
+                $_.ToString("x2")
+            }
+        )
+    ).ToUpperInvariant()
+}
+
+
+function Write-JungleReflowWorkerResult {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path,
+
+        [Parameter(Mandatory=$true)]
+        [object]$Result
+    )
+
+
+    $encoding =
+        New-Object System.Text.UTF8Encoding(
+            $false
+        )
+
+
+    $json =
+        $Result |
+        ConvertTo-Json -Depth 15
+
+
+    [System.IO.File]::WriteAllText(
+        $Path,
+        $json,
+        $encoding
+    )
+}
+
+
+function Remove-JungleRejectedArtifact {
+
+    param(
+        [string]$SourcePath,
+
+        [string]$ArtifactPath
+    )
+
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $ArtifactPath
+        )
+    ) {
+
+        return
+    }
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $ArtifactPath `
+            -PathType Leaf
+    )) {
+
+        return
+    }
+
+
+    $sourceFull =
+        [System.IO.Path]::GetFullPath(
+            $SourcePath
+        )
+
+
+    $artifactFull =
+        [System.IO.Path]::GetFullPath(
+            $ArtifactPath
+        )
+
+
+    if (
+        [string]::Equals(
+            $sourceFull,
+            $artifactFull,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+
+        throw (
+            "REFLOW safety refused to delete source presentation."
+        )
+    }
+
+
+    Remove-Item `
+        -LiteralPath $ArtifactPath `
+        -Force
+}
+
+
+$resultPath =
+    $null
+
+
+$artifactPath =
+    $null
+
+
+$sourcePath =
+    $null
+
+
+try {
+
+    # ============================================================
+    # 1. INPUT
+    # ============================================================
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $InputJsonPath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "REFLOW worker input missing: " +
+            $InputJsonPath
+        )
+    }
+
+
+    $inputText =
+        [System.IO.File]::ReadAllText(
+            $InputJsonPath
+        )
+
+
+    $inputData =
+        $inputText |
+        ConvertFrom-Json
+
+
+    if (
+        [string]$inputData.protocol -ne
+        "JUNGLE_SMART_REFLOW_WORKER_PROTOCOL_V2"
+    ) {
+
+        throw (
+            "Invalid REFLOW Worker Protocol."
+        )
+    }
+
+
+    $resultPath =
+        [string]$inputData.result_path
+
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $resultPath
+        )
+    ) {
+
+        throw (
+            "Worker result path missing."
+        )
+    }
+
+
+    $request =
+        [string]$inputData.request
+
+
+    $expectedRequestHash =
+        [string]$inputData.request_sha256
+
+
+    $actualRequestHash =
+        Get-JungleWorkerStringSha256 `
+            -Text $request
+
+
+    if (
+        $actualRequestHash -ne
+        $expectedRequestHash
+    ) {
+
+        throw (
+            "REFLOW worker request SHA256 mismatch."
+        )
+    }
+
+
+    $configPath =
+        [string]$inputData.config_path
+
+
+    $executorPath =
+        [string]$inputData.executor_path
+
+
+    $guardPath =
+        [string]$inputData.guard_path
+
+
+    $dryRun =
+        [bool]$inputData.dry_run
+
+
+    # ============================================================
+    # 2. ROOT / DEPENDENCIES
+    # ============================================================
+
+    $root =
+        Split-Path `
+            -Parent (
+                Split-Path `
+                    -Parent $MyInvocation.MyCommand.Path
+            )
+
+
+    $changedScopePath =
+        Join-Path `
+            $root `
+            "modules\changed_scope.ps1"
+
+
+    $selectiveQaPath =
+        Join-Path `
+            $root `
+            "modules\selective_visual_qa.ps1"
+
+
+    # JUNGLE_SMART_REFLOW_WATCHDOG_DEPENDENCY_FIX_V2
+
+    $watchdogPath =
+        Join-Path `
+            $root `
+            "modules\watchdog.ps1"
+
+
+    $blindQaPath =
+        Join-Path `
+            $root `
+            "modules\blind_pairwise_qa.ps1"
+
+
+    $verifierPath =
+        Join-Path `
+            $root `
+            "modules\verifier.ps1"
+
+
+    $reQaPath =
+        "C:\AI\scripts\run_pptx_visual_reqa_v1.ps1"
+
+
+    foreach ($file in @(
+        $configPath,
+        $executorPath,
+        $guardPath,
+        $changedScopePath,
+        $selectiveQaPath,
+        $watchdogPath,
+        $blindQaPath,
+        $verifierPath,
+        $reQaPath
+    )) {
+
+        if (-not (
+            Test-Path `
+                -LiteralPath $file `
+                -PathType Leaf
+        )) {
+
+            throw (
+                "REFLOW dependency missing: " +
+                $file
+            )
+        }
+    }
+
+
+    # ============================================================
+    # 3. EXACT EXECUTOR / SCORER HASHES
+    # ============================================================
+
+    $expectedExecutorHash =
+        "FF8797734A1852419AE925E7F70EFCA7B3D66529F8079272B282505C96C13664"
+
+
+    $expectedReQaHash =
+        "1FC6759EFEE0C208932E24D7EB8D4F53681F5D7A3238D6C0FB00B2ECC4EEEA6F"
+
+
+    $actualExecutorHash =
+        (
+            Get-FileHash `
+                -LiteralPath $executorPath `
+                -Algorithm SHA256
+        ).Hash
+
+
+    $actualReQaHash =
+        (
+            Get-FileHash `
+                -LiteralPath $reQaPath `
+                -Algorithm SHA256
+        ).Hash
+
+
+    if (
+        $actualExecutorHash -ne
+        $expectedExecutorHash
+    ) {
+
+        throw (
+            "REFLOW executor integrity failure."
+        )
+    }
+
+
+    if (
+        $actualReQaHash -ne
+        $expectedReQaHash
+    ) {
+
+        throw (
+            "PPT Visual Re-QA scorer integrity failure."
+        )
+    }
+
+
+    # ============================================================
+    # 4. CONFIG
+    # ============================================================
+
+    $config =
+        Get-Content `
+            -LiteralPath $configPath `
+            -Raw |
+        ConvertFrom-Json
+
+
+    if (-not $config.feature_flags.reflow_v1) {
+
+        throw (
+            "REFLOW V1 feature flag is OFF."
+        )
+    }
+
+
+    if (-not $config.policy.hard_gate_required) {
+
+        throw (
+            "REFLOW requires Hard Gate."
+        )
+    }
+
+
+    # ============================================================
+    # 5. SOURCE PATH
+    # ============================================================
+
+    $sourceMatch =
+        [regex]::Match(
+            $request,
+            '(?i)(?:"(?<p>[A-Z]:\\[^"]+?\.pptx?)"|''(?<p>[A-Z]:\\[^'']+?\.pptx?)''|(?<p>[A-Z]:\\.*?\.pptx?)(?=\s|$))'
+        )
+
+
+    if (-not $sourceMatch.Success) {
+
+        throw (
+            "REFLOW worker could not resolve source PPT path."
+        )
+    }
+
+
+    $sourcePath =
+        [string]$sourceMatch.Groups["p"].Value
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $sourcePath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "REFLOW source PPT missing: " +
+            $sourcePath
+        )
+    }
+
+
+    $sourceHashBefore =
+        (
+            Get-FileHash `
+                -LiteralPath $sourcePath `
+                -Algorithm SHA256
+        ).Hash
+
+
+    # ============================================================
+    # 6. LOAD LOCAL QA MODULES
+    # ============================================================
+
+    . $guardPath
+    . $changedScopePath
+    . $selectiveQaPath
+    . $watchdogPath
+    . $blindQaPath
+    . $verifierPath
+
+
+    # ============================================================
+    # 7. DRY RUN
+    # ============================================================
+
+    if ($dryRun) {
+
+        $gate85 =
+            Test-JungleHardGate `
+                -Score 85 `
+                -Critical 0 `
+                -Major 0
+
+
+        $gate84 =
+            Test-JungleHardGate `
+                -Score 84 `
+                -Critical 0 `
+                -Major 0
+
+
+        $gateCritical =
+            Test-JungleHardGate `
+                -Score 95 `
+                -Critical 1 `
+                -Major 0
+
+
+        $gateMajor =
+            Test-JungleHardGate `
+                -Score 95 `
+                -Critical 0 `
+                -Major 1
+
+
+        if (
+            -not $gate85 `
+            -or
+            $gate84 `
+            -or
+            $gateCritical `
+            -or
+            $gateMajor
+        ) {
+
+            throw (
+                "Hard Gate deterministic self-test failed."
+            )
+        }
+
+
+        $dryResult =
+            [ordered]@{
+
+                protocol =
+                    "JUNGLE_SMART_REFLOW_WORKER_RESULT_V2"
+
+                status =
+                    "REFLOW_DRY_RUN_READY"
+
+                accepted =
+                    $true
+
+                pipeline_complete =
+                    $false
+
+                executor_called =
+                    $false
+
+                ai_calls =
+                    0
+
+                com_calls =
+                    0
+
+                source_path =
+                    $sourcePath
+
+                source_sha256 =
+                    $sourceHashBefore
+
+                mutation_boundary =
+                    "READY"
+
+                changed_scope =
+                    "READY"
+
+                blind_pairwise =
+                    "READY"
+
+                visual_reqa =
+                    "READY"
+
+                hard_gate =
+                    "READY"
+
+                hard_gate_rule =
+                    "score>=85;critical=0;major=0"
+            }
+
+
+        Write-JungleReflowWorkerResult `
+            -Path $resultPath `
+            -Result $dryResult
+
+
+        Write-Host (
+            "STATUS : JUNGLE_REFLOW_WORKER_DRY_RUN_READY"
+        )
+
+
+        exit 0
+    }
+
+
+    # ============================================================
+    # 8. LIVE EXECUTION
+    # ============================================================
+
+    $runDirectory =
+        Split-Path `
+            -Parent $resultPath
+
+
+    $executorLogPath =
+        Join-Path `
+            $runDirectory `
+            "reflow_executor.log"
+
+
+    $scopeDir =
+        Join-Path `
+            $runDirectory `
+            "changed_scope"
+
+
+    $scopeJsonPath =
+        Join-Path `
+            $runDirectory `
+            "changed_scope.json"
+
+
+    $qaRequestPath =
+        Join-Path `
+            $runDirectory `
+            "visual_qa_request.json"
+
+
+    $blindQaDirectory =
+        Join-Path `
+            $runDirectory `
+            "blind_pairwise_qa"
+
+
+    $reQaOutputDirectory =
+        Join-Path `
+            $runDirectory `
+            "visual_reqa_result"
+
+
+    $reQaWorkRoot =
+        Join-Path `
+            $runDirectory `
+            "visual_reqa_work"
+
+
+    $reQaLogPath =
+        Join-Path `
+            $runDirectory `
+            "visual_reqa.log"
+
+
+    foreach ($dir in @(
+        $scopeDir,
+        $blindQaDirectory,
+        $reQaOutputDirectory,
+        $reQaWorkRoot
+    )) {
+
+        New-Item `
+            -ItemType Directory `
+            -Path $dir `
+            -Force |
+        Out-Null
+    }
+
+
+    # ------------------------------------------------------------
+    # Snapshot output PPT paths before executor.
+    # ------------------------------------------------------------
+
+    $outputDirectory =
+        "C:\AI\work\output"
+
+
+    New-Item `
+        -ItemType Directory `
+        -Path $outputDirectory `
+        -Force |
+    Out-Null
+
+
+    $beforeOutputPaths =
+        @{}
+
+
+    foreach (
+        $file in
+        @(
+            Get-ChildItem `
+                -LiteralPath $outputDirectory `
+                -Filter "*.pptx" `
+                -File
+        )
+    ) {
+
+        $beforeOutputPaths[
+            $file.FullName.ToLowerInvariant()
+        ] =
+            $true
+    }
+
+
+    # ============================================================
+    # 9. REFLOW EXECUTOR
+    # ============================================================
+
+    $executorOutput =
+        (
+            & $executorPath `
+                -FilePath $sourcePath `
+                -UserRequest $request *>&1 |
+            Out-String
+        )
+
+
+    [System.IO.File]::WriteAllText(
+        $executorLogPath,
+        $executorOutput,
+        (
+            New-Object System.Text.UTF8Encoding(
+                $true
+            )
+        )
+    )
+
+
+    if (-not (
+        [regex]::IsMatch(
+            $executorOutput,
+            '(?im)^\s*STATUS:\s*PPT_REFLOW_MODIFY_COMPLETE\s*$'
+        )
+    )) {
+
+        throw (
+            "REFLOW executor did not report COMPLETE."
+        )
+    }
+
+
+    # ------------------------------------------------------------
+    # Prefer authoritative File : path emitted by executor.
+    # ------------------------------------------------------------
+
+    $artifactMatch =
+        [regex]::Match(
+            $executorOutput,
+            '(?im)^\s*File\s*:\s*(?<p>[A-Z]:\\[^\r\n]+?\.pptx)\s*$'
+        )
+
+
+    if ($artifactMatch.Success) {
+
+        $artifactPath =
+            [string]$artifactMatch.Groups["p"].Value
+    }
+    else {
+
+        # --------------------------------------------------------
+        # Fallback: FullName snapshot difference.
+        # No LastWriteTime dependency.
+        # --------------------------------------------------------
+
+        $newCandidates =
+            @(
+                Get-ChildItem `
+                    -LiteralPath $outputDirectory `
+                    -Filter "*.pptx" `
+                    -File |
+                Where-Object {
+
+                    -not $beforeOutputPaths.ContainsKey(
+                        $_.FullName.ToLowerInvariant()
+                    )
+                }
+            )
+
+
+        if ($newCandidates.Count -ne 1) {
+
+            throw (
+                "REFLOW artifact discovery failed. New candidates=" +
+                $newCandidates.Count
+            )
+        }
+
+
+        $artifactPath =
+            $newCandidates[0].FullName
+    }
+
+
+    if (-not (
+        Test-JungleArtifact `
+            -Path $artifactPath
+    )) {
+
+        throw (
+            "REFLOW artifact validation failed."
+        )
+    }
+
+
+    $sourceHashAfterExecutor =
+        (
+            Get-FileHash `
+                -LiteralPath $sourcePath `
+                -Algorithm SHA256
+        ).Hash
+
+
+    if (
+        $sourceHashAfterExecutor -ne
+        $sourceHashBefore
+    ) {
+
+        throw (
+            "REFLOW source presentation changed."
+        )
+    }
+
+
+    # ============================================================
+    # 10. MUTATION BOUNDARY - SECOND ASSERTION
+    #
+    # Executor already performs it.
+    # Worker independently asserts again.
+    # ============================================================
+
+    $mutationResult =
+        Assert-JungleReflowMutationBoundary `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath `
+            -SourceHashBefore $sourceHashBefore
+
+
+    if (-not [bool]$mutationResult.passed) {
+
+        Remove-JungleRejectedArtifact `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath
+
+
+        throw (
+            "Worker Mutation Boundary failed."
+        )
+    }
+
+
+    # ============================================================
+    # 11. CHANGED SCOPE
+    # ============================================================
+
+    $scope =
+        Get-JungleChangedScope `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath `
+            -WorkDirectory $scopeDir
+
+
+    $scope |
+        ConvertTo-Json -Depth 10 |
+        Set-Content `
+            -LiteralPath $scopeJsonPath `
+            -Encoding UTF8
+
+
+    if (-not [bool]$scope.pass) {
+
+        Remove-JungleRejectedArtifact `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath
+
+
+        throw (
+            "REFLOW Changed Scope failed."
+        )
+    }
+
+
+    # ============================================================
+    # 12. NO VISUAL CHANGE
+    #
+    # Accepted only as NO-OP.
+    # This is NOT a Hard Gate verified improvement.
+    # ============================================================
+
+    if (
+        [bool]$scope.byte_identical `
+        -or
+        [int]$scope.changed_count -eq 0
+    ) {
+
+        $noOpResult =
+            [ordered]@{
+
+                protocol =
+                    "JUNGLE_SMART_REFLOW_WORKER_RESULT_V2"
+
+                status =
+                    "REFLOW_NOOP"
+
+                accepted =
+                    $true
+
+                pipeline_complete =
+                    $false
+
+                hard_gate_passed =
+                    $false
+
+                hard_gate_state =
+                    "SKIPPED_NO_VISUAL_CHANGE"
+
+                source_path =
+                    $sourcePath
+
+                source_sha256 =
+                    $sourceHashBefore
+
+                artifact_path =
+                    $artifactPath
+
+                artifact_sha256 =
+                    (
+                        Get-FileHash `
+                            -LiteralPath $artifactPath `
+                            -Algorithm SHA256
+                    ).Hash
+
+                byte_identical =
+                    [bool]$scope.byte_identical
+
+                changed_count =
+                    0
+
+                changed_slides =
+                    @()
+
+                ai_calls =
+                    (
+                        [regex]::Matches(
+                            $executorOutput,
+                            '(?im)^\s*PPT_REFLOW_PLAN_CREATED\s*$'
+                        )
+                    ).Count
+
+                message =
+                    "REFLOW produced no visual change. Accepted only as NO-OP, not as verified improvement."
+            }
+
+
+        Write-JungleReflowWorkerResult `
+            -Path $resultPath `
+            -Result $noOpResult
+
+
+        Write-Host (
+            "STATUS : JUNGLE_REFLOW_NOOP"
+        )
+
+
+        exit 0
+    }
+
+
+    # ============================================================
+    # 13. QA MUST BE ENABLED FOR CHANGED REFLOW
+    # ============================================================
+
+    if (-not $config.feature_flags.blind_pairwise_qa) {
+
+        Remove-JungleRejectedArtifact `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath
+
+
+        throw (
+            "REFLOW changed artifact requires Blind Pairwise QA."
+        )
+    }
+
+
+    if (-not $config.visual_qa.live_execution) {
+
+        Remove-JungleRejectedArtifact `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath
+
+
+        throw (
+            "REFLOW changed artifact requires live Visual QA."
+        )
+    }
+
+
+    # ============================================================
+    # 14. SELECTIVE QA DECISION
+    # ============================================================
+
+    $maxSlidesPerCall =
+        [int]$config.visual_qa.max_slides_per_call
+
+
+    $qaDecision =
+        Get-JungleSelectiveVisualQaDecision `
+            -ChangedSlides @($scope.changed_slides) `
+            -ByteIdentical ([bool]$scope.byte_identical) `
+            -MaxSlidesPerCall $maxSlidesPerCall
+
+
+    Write-JungleSelectiveVisualQaRequest `
+        -Decision $qaDecision `
+        -SourcePath $sourcePath `
+        -ArtifactPath $artifactPath `
+        -OutputPath $qaRequestPath |
+    Out-Null
+
+
+    if (-not [bool]$qaDecision.visual_qa_required) {
+
+        Remove-JungleRejectedArtifact `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath
+
+
+        throw (
+            "Changed REFLOW artifact unexpectedly skipped Visual QA."
+        )
+    }
+
+
+    # ============================================================
+    # 15. BLIND PAIRWISE REGRESSION GATE
+    # ============================================================
+
+    [int[]]$changedSlides =
+        @(
+            $scope.changed_slides |
+            ForEach-Object {
+                [int]$_
+            }
+        )
+
+
+    $blindQa =
+        Invoke-JungleBlindPairwiseVisualQa `
+            -Root $root `
+            -ChangedSlides $changedSlides `
+            -ScopeDirectory $scopeDir `
+            -ArtifactPath $artifactPath `
+            -RunDirectory $blindQaDirectory `
+            -TimeoutSeconds ([int]$config.visual_qa.timeout_seconds) `
+            -PollMilliseconds ([int]$config.watchdog.poll_milliseconds)
+
+
+    if (-not [bool]$blindQa.pass) {
+
+        # ========================================================
+        # JUNGLE_SMART_REFLOW_SELECTIVE_KEEP_ORIGINAL_V1
+        #
+        # BEFORE_BETTER slide:
+        #   discard its operations
+        #   keep original source state
+        #
+        # IMPORTANT:
+        #   original Claude plan is reused.
+        #   Claude does NOT re-plan.
+        # ========================================================
+
+        $selectiveRecovered =
+            $false
+
+        $selectiveRecoveryError =
+            ""
+
+        $initialBlindClaudeCalls =
+            0
+
+
+        if (
+            $null -ne
+            $blindQa.PSObject.Properties["claude_calls"]
+        ) {
+
+            $initialBlindClaudeCalls =
+                [int]$blindQa.claude_calls
+        }
+
+
+        [int[]]$initialChangedSlides =
+            @(
+                $changedSlides |
+                ForEach-Object {
+                    [int]$_
+                }
+            )
+
+
+        [int[]]$rejectedSlides =
+            @()
+
+
+        $selectiveReplayArtifactPath =
+            ""
+
+
+        try {
+
+            # ====================================================
+            # 1. Pairwise BEFORE_BETTER slides
+            # ====================================================
+
+            $pairwiseResultPath =
+                Join-Path `
+                    $blindQaDirectory `
+                    "visual_qa_result.json"
+
+
+            if (-not (
+                Test-Path `
+                    -LiteralPath $pairwiseResultPath `
+                    -PathType Leaf
+            )) {
+
+                throw (
+                    "Pairwise visual_qa_result.json missing."
+                )
+            }
+
+
+            $pairwiseResult =
+                Get-Content `
+                    -LiteralPath $pairwiseResultPath `
+                    -Raw |
+                ConvertFrom-Json
+
+
+            $rejectedSlides =
+                @(
+                    $pairwiseResult.results |
+                    Where-Object {
+
+                        [string]$_.comparison -eq
+                        "BEFORE_BETTER"
+                    } |
+                    ForEach-Object {
+
+                        [int]$_.slide
+                    } |
+                    Sort-Object -Unique
+                )
+
+
+            if ($rejectedSlides.Count -lt 1) {
+
+                throw (
+                    "Pairwise failed without BEFORE_BETTER slide."
+                )
+            }
+
+
+            foreach ($rejectedSlide in $rejectedSlides) {
+
+                if (
+                    $initialChangedSlides -notcontains
+                    [int]$rejectedSlide
+                ) {
+
+                    throw (
+                        "Rejected slide was not in Changed Scope: " +
+                        $rejectedSlide
+                    )
+                }
+            }
+
+
+            [int[]]$survivingSlides =
+                @(
+                    $initialChangedSlides |
+                    Where-Object {
+
+                        $rejectedSlides -notcontains
+                        [int]$_
+                    }
+                )
+
+
+            if ($survivingSlides.Count -lt 1) {
+
+                throw (
+                    "Every changed slide was rejected."
+                )
+            }
+
+
+            # ====================================================
+            # 2. Locate original combined plan
+            # ====================================================
+
+            $planMatch =
+                [regex]::Match(
+                    $executorOutput,
+                    '(?im)^\s*Plan\s*:\s*(?<p>[A-Z]:\\[^\r\n]+?\.json)\s*$'
+                )
+
+
+            if (-not $planMatch.Success) {
+
+                throw (
+                    "Original combined REFLOW plan path missing."
+                )
+            }
+
+
+            $originalPlanPath =
+                [string]$planMatch.Groups["p"].Value
+
+
+            if (-not (
+                Test-Path `
+                    -LiteralPath $originalPlanPath `
+                    -PathType Leaf
+            )) {
+
+                throw (
+                    "Original combined REFLOW plan file missing."
+                )
+            }
+
+
+            $replayPlanPath =
+                Join-Path `
+                    $runDirectory `
+                    "selective_replay_source_plan.json"
+
+
+            Copy-Item `
+                -LiteralPath $originalPlanPath `
+                -Destination $replayPlanPath `
+                -Force
+
+
+            # ====================================================
+            # 3. Source integrity before replay
+            # ====================================================
+
+            $sourceHashBeforeRecovery =
+                (
+                    Get-FileHash `
+                        -LiteralPath $sourcePath `
+                        -Algorithm SHA256
+                ).Hash
+
+
+            $initialRejectedArtifactPath =
+                $artifactPath
+
+
+            # Executor uses second-resolution output names.
+            # Avoid first/replay collision.
+
+            Start-Sleep `
+                -Milliseconds 1100
+
+
+            # ====================================================
+            # 4. Deterministic replay
+            #    NO Claude planning
+            # ====================================================
+
+            $replayLogPath =
+                Join-Path `
+                    $runDirectory `
+                    "reflow_selective_replay.log"
+
+
+            $replayOutput =
+                (
+                    & $executorPath `
+                        -FilePath $sourcePath `
+                        -UserRequest $request `
+                        -ReplayPlanPath $replayPlanPath `
+                        -ExcludeSlides $rejectedSlides *>&1 |
+                    Out-String
+                )
+
+
+            [System.IO.File]::WriteAllText(
+                $replayLogPath,
+                $replayOutput,
+                (
+                    New-Object System.Text.UTF8Encoding(
+                        $true
+                    )
+                )
+            )
+
+
+            if (-not (
+                [regex]::IsMatch(
+                    $replayOutput,
+                    '(?im)^\s*STATUS:\s*PPT_REFLOW_MODIFY_COMPLETE\s*$'
+                )
+            )) {
+
+                throw (
+                    "Selective replay Executor did not report COMPLETE."
+                )
+            }
+
+
+            if (-not (
+                [regex]::IsMatch(
+                    $replayOutput,
+                    '(?im)^\s*PPT_REFLOW_PLAN_REPLAYED\s*$'
+                )
+            )) {
+
+                throw (
+                    "Selective replay confirmation marker missing."
+                )
+            }
+
+
+            # Replay MUST NOT create a new Claude plan.
+
+            if (
+                [regex]::IsMatch(
+                    $replayOutput,
+                    '(?im)^\s*PPT_REFLOW_PLAN_CREATED\s*$'
+                )
+            ) {
+
+                throw (
+                    "Selective replay unexpectedly called Claude planning."
+                )
+            }
+
+
+            $replayArtifactMatch =
+                [regex]::Match(
+                    $replayOutput,
+                    '(?im)^\s*File\s*:\s*(?<p>[A-Z]:\\[^\r\n]+?\.pptx)\s*$'
+                )
+
+
+            if (-not $replayArtifactMatch.Success) {
+
+                throw (
+                    "Selective replay artifact path missing."
+                )
+            }
+
+
+            $selectiveReplayArtifactPath =
+                [string]$replayArtifactMatch.Groups["p"].Value
+
+
+            if (-not (
+                Test-Path `
+                    -LiteralPath $selectiveReplayArtifactPath `
+                    -PathType Leaf
+            )) {
+
+                throw (
+                    "Selective replay artifact does not exist."
+                )
+            }
+
+
+            $sourceHashAfterRecovery =
+                (
+                    Get-FileHash `
+                        -LiteralPath $sourcePath `
+                        -Algorithm SHA256
+                ).Hash
+
+
+            if (
+                $sourceHashAfterRecovery -ne
+                $sourceHashBeforeRecovery
+            ) {
+
+                throw (
+                    "Source changed during selective replay."
+                )
+            }
+
+
+            # ====================================================
+            # 5. Changed Scope on replay candidate
+            # ====================================================
+
+            $recoveryScopeDir =
+                Join-Path `
+                    $runDirectory `
+                    "changed_scope_recovery"
+
+
+            if (
+                Test-Path `
+                    -LiteralPath $recoveryScopeDir `
+                    -PathType Container
+            ) {
+
+                Remove-Item `
+                    -LiteralPath $recoveryScopeDir `
+                    -Recurse `
+                    -Force
+            }
+
+
+            New-Item `
+                -ItemType Directory `
+                -Path $recoveryScopeDir `
+                -Force |
+            Out-Null
+
+
+            $recoveryScope =
+                Get-JungleChangedScope `
+                    -SourcePath $sourcePath `
+                    -ArtifactPath $selectiveReplayArtifactPath `
+                    -WorkDirectory $recoveryScopeDir
+
+
+            if (-not [bool]$recoveryScope.pass) {
+
+                throw (
+                    "Changed Scope failed after selective replay."
+                )
+            }
+
+
+            [int[]]$recoveryChangedSlides =
+                @(
+                    $recoveryScope.changed_slides |
+                    ForEach-Object {
+                        [int]$_
+                    }
+                )
+
+
+            if ($recoveryChangedSlides.Count -lt 1) {
+
+                throw (
+                    "Selective replay produced no surviving changes."
+                )
+            }
+
+
+            foreach ($rejectedSlide in $rejectedSlides) {
+
+                if (
+                    $recoveryChangedSlides -contains
+                    [int]$rejectedSlide
+                ) {
+
+                    throw (
+                        "KEEP_ORIGINAL slide still changed: " +
+                        $rejectedSlide
+                    )
+                }
+            }
+
+
+            # ====================================================
+            # 6. Rebuild Selective QA request
+            # ====================================================
+
+            $recoveryQaDecision =
+                Get-JungleSelectiveVisualQaDecision `
+                    -ChangedSlides @($recoveryScope.changed_slides) `
+                    -ByteIdentical ([bool]$recoveryScope.byte_identical) `
+                    -MaxSlidesPerCall $maxSlidesPerCall
+
+
+            if (-not [bool]$recoveryQaDecision.visual_qa_required) {
+
+                throw (
+                    "Recovered artifact unexpectedly skipped Visual QA."
+                )
+            }
+
+
+            $recoveryQaRequestPath =
+                Join-Path `
+                    $runDirectory `
+                    "visual_qa_request_recovery.json"
+
+
+            Write-JungleSelectiveVisualQaRequest `
+                -Decision $recoveryQaDecision `
+                -SourcePath $sourcePath `
+                -ArtifactPath $selectiveReplayArtifactPath `
+                -OutputPath $recoveryQaRequestPath |
+            Out-Null
+
+
+            # ====================================================
+            # 7. Blind Pairwise on surviving slides
+            # ====================================================
+
+            $recoveryBlindQaDirectory =
+                Join-Path `
+                    $runDirectory `
+                    "blind_pairwise_qa_recovery"
+
+
+            $recoveryBlindQa =
+                Invoke-JungleBlindPairwiseVisualQa `
+                    -Root $root `
+                    -ChangedSlides $recoveryChangedSlides `
+                    -ScopeDirectory $recoveryScopeDir `
+                    -ArtifactPath $selectiveReplayArtifactPath `
+                    -RunDirectory $recoveryBlindQaDirectory `
+                    -TimeoutSeconds ([int]$config.visual_qa.timeout_seconds) `
+                    -PollMilliseconds ([int]$config.watchdog.poll_milliseconds)
+
+
+            if (-not [bool]$recoveryBlindQa.pass) {
+
+                throw (
+                    "Recovered artifact failed Pairwise recheck."
+                )
+            }
+
+
+            if (
+                [int]$recoveryBlindQa.before_better_count -ne 0 `
+                -or
+                [int]$recoveryBlindQa.critical_regressions -ne 0 `
+                -or
+                [int]$recoveryBlindQa.major_regressions -ne 0
+            ) {
+
+                throw (
+                    "Recovered Pairwise result is inconsistent."
+                )
+            }
+
+
+            # ====================================================
+            # 8. AI accounting
+            # ====================================================
+
+            if (
+                $null -ne
+                $recoveryBlindQa.PSObject.Properties["claude_calls"]
+            ) {
+
+                $recoveryBlindQa.claude_calls =
+                    (
+                        $initialBlindClaudeCalls +
+                        [int]$recoveryBlindQa.claude_calls
+                    )
+            }
+
+
+            # ====================================================
+            # 9. Audit BEFORE promotion
+            # ====================================================
+
+            $recoveryRecordPath =
+                Join-Path `
+                    $runDirectory `
+                    "selective_keep_original.json"
+
+
+            $recoveryRecord =
+                [ordered]@{
+
+                    protocol =
+                        "JUNGLE_SMART_REFLOW_SELECTIVE_KEEP_ORIGINAL_V1"
+
+                    rejected_slides =
+                        @($rejectedSlides)
+
+                    surviving_changed_slides =
+                        @($recoveryChangedSlides)
+
+                    original_plan =
+                        $originalPlanPath
+
+                    replay_plan =
+                        $replayPlanPath
+
+                    replay_log =
+                        $replayLogPath
+
+                    replay_artifact =
+                        $selectiveReplayArtifactPath
+
+                    claude_replanning =
+                        0
+
+                    pairwise_recheck =
+                        "PASS"
+
+                    status =
+                        "READY_TO_PROMOTE"
+                }
+
+
+            [System.IO.File]::WriteAllText(
+                $recoveryRecordPath,
+                (
+                    $recoveryRecord |
+                    ConvertTo-Json -Depth 12
+                ),
+                (
+                    New-Object System.Text.UTF8Encoding(
+                        $false
+                    )
+                )
+            )
+
+
+            # ====================================================
+            # 10. Promote recovered candidate
+            #
+            # Only now discard first rejected artifact.
+            # ====================================================
+
+            Remove-JungleRejectedArtifact `
+                -SourcePath $sourcePath `
+                -ArtifactPath $initialRejectedArtifactPath
+
+
+            $artifactPath =
+                $selectiveReplayArtifactPath
+
+
+            $scopeDir =
+                $recoveryScopeDir
+
+
+            $scope =
+                $recoveryScope
+
+
+            [int[]]$changedSlides =
+                @(
+                    $recoveryChangedSlides
+                )
+
+
+            $qaDecision =
+                $recoveryQaDecision
+
+
+            $qaRequestPath =
+                $recoveryQaRequestPath
+
+
+            $blindQaDirectory =
+                $recoveryBlindQaDirectory
+
+
+            $blindQa =
+                $recoveryBlindQa
+
+
+            # Canonical Changed Scope record now describes
+            # the promoted recovered artifact.
+
+            [System.IO.File]::WriteAllText(
+                $scopeJsonPath,
+                (
+                    $scope |
+                    ConvertTo-Json -Depth 12
+                ),
+                (
+                    New-Object System.Text.UTF8Encoding(
+                        $false
+                    )
+                )
+            )
+
+
+            # Original Executor output carries the one real
+            # Claude plan call. Replay output has only REPLAYED.
+
+            $executorOutput =
+                (
+                    $executorOutput +
+                    "`r`n" +
+                    $replayOutput
+                )
+
+
+            $recoveryRecord.status =
+                "RECOVERED"
+
+
+            [System.IO.File]::WriteAllText(
+                $recoveryRecordPath,
+                (
+                    $recoveryRecord |
+                    ConvertTo-Json -Depth 12
+                ),
+                (
+                    New-Object System.Text.UTF8Encoding(
+                        $false
+                    )
+                )
+            )
+
+
+            $selectiveRecovered =
+                $true
+
+
+            Write-Host ""
+            Write-Host "========================================"
+            Write-Host " SELECTIVE KEEP_ORIGINAL RECOVERED"
+            Write-Host "========================================"
+
+            Write-Host (
+                "KEEP_ORIGINAL slides : " +
+                (
+                    @($rejectedSlides) -join ", "
+                )
+            )
+
+            Write-Host (
+                "Accepted slides      : " +
+                (
+                    @($changedSlides) -join ", "
+                )
+            )
+
+            Write-Host "Claude replanning    : 0"
+            Write-Host "Pairwise recheck     : PASS"
+            Write-Host ""
+            Write-Host "STATUS : JUNGLE_REFLOW_SELECTIVE_KEEP_ORIGINAL_RECOVERED"
+            Write-Host ""
+        }
+        catch {
+
+            $selectiveRecoveryError =
+                $_.Exception.Message
+
+
+            # ----------------------------------------------------
+            # FIXED FOR POWERSHELL 5.1
+            #
+            # Test-Path is explicitly a parenthesized expression.
+            # ----------------------------------------------------
+
+            if (
+                (-not [string]::IsNullOrWhiteSpace(
+                    $selectiveReplayArtifactPath
+                )) `
+                -and
+                (
+                    Test-Path `
+                        -LiteralPath $selectiveReplayArtifactPath `
+                        -PathType Leaf
+                )
+            ) {
+
+                Remove-JungleRejectedArtifact `
+                    -SourcePath $sourcePath `
+                    -ArtifactPath $selectiveReplayArtifactPath
+            }
+
+
+            Write-Host ""
+            Write-Host "SELECTIVE KEEP_ORIGINAL recovery failed."
+            Write-Host (
+                "Reason : " +
+                $selectiveRecoveryError
+            )
+            Write-Host ""
+        }
+
+
+        # ========================================================
+        # 11. Fail closed
+        # ========================================================
+
+        if (-not $selectiveRecovered) {
+
+            Remove-JungleRejectedArtifact `
+                -SourcePath $sourcePath `
+                -ArtifactPath $artifactPath
+
+
+            $blindReject =
+                [ordered]@{
+
+                    protocol =
+                        "JUNGLE_SMART_REFLOW_WORKER_RESULT_V2"
+
+                    status =
+                        "REFLOW_PAIRWISE_REJECTED"
+
+                    accepted =
+                        $false
+
+                    pipeline_complete =
+                        $false
+
+                    artifact_removed =
+                        $true
+
+                    changed_slides =
+                        $changedSlides
+
+                    before_better_count =
+                        [int]$blindQa.before_better_count
+
+                    critical_regressions =
+                        [int]$blindQa.critical_regressions
+
+                    major_regressions =
+                        [int]$blindQa.major_regressions
+
+                    hard_gate_state =
+                        "NOT_REACHED"
+
+                    selective_keep_original =
+                        $false
+
+                    selective_recovery_error =
+                        $selectiveRecoveryError
+
+                    message =
+                        "Blind Pairwise regression gate rejected REFLOW artifact."
+                }
+
+
+            Write-JungleReflowWorkerResult `
+                -Path $resultPath `
+                -Result $blindReject
+
+
+            Write-Host (
+                "STATUS : JUNGLE_REFLOW_PAIRWISE_REJECTED"
+            )
+
+
+            exit 4
+        }
+    }
+
+    # ============================================================
+    # 16. EXISTING PPT VISUAL RE-QA SCORER
+    #
+    # This is the existing v3.2 scorer.
+    # No new score formula is introduced.
+    # ============================================================
+
+    $reQaOutput =
+        (
+            & $reQaPath `
+                -BeforePath $sourcePath `
+                -AfterPath $artifactPath `
+                -ChunkSize $maxSlidesPerCall `
+                -OutputDir $reQaOutputDirectory `
+                -WorkRoot $reQaWorkRoot *>&1 |
+            Out-String
+        )
+
+
+    [System.IO.File]::WriteAllText(
+        $reQaLogPath,
+        $reQaOutput,
+        (
+            New-Object System.Text.UTF8Encoding(
+                $true
+            )
+        )
+    )
+
+
+    if (-not (
+        [regex]::IsMatch(
+            $reQaOutput,
+            '(?im)^\s*STATUS:\s*PPT_VISUAL_REQA_COMPLETE\s*$'
+        )
+    )) {
+
+        Remove-JungleRejectedArtifact `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath
+
+
+        throw (
+            "PPT Visual Re-QA did not report COMPLETE."
+        )
+    }
+
+
+    $reQaFiles =
+        @(
+            Get-ChildItem `
+                -LiteralPath $reQaOutputDirectory `
+                -Filter "Jungle_PPT_Visual_ReQA_*.json" `
+                -File
+        )
+
+
+    if ($reQaFiles.Count -ne 1) {
+
+        Remove-JungleRejectedArtifact `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath
+
+
+        throw (
+            "Expected exactly one PPT Visual Re-QA JSON. Found=" +
+            $reQaFiles.Count
+        )
+    }
+
+
+    $reQaJsonPath =
+        $reQaFiles[0].FullName
+
+
+    $visualQa =
+        Get-Content `
+            -LiteralPath $reQaJsonPath `
+            -Raw |
+        ConvertFrom-Json
+
+
+    # ============================================================
+    # 17. RESOLVE EXISTING SCORER'S AVERAGE SCORE
+    #
+    # Prefer persisted JSON if field is available.
+    # Otherwise use scorer's own printed "Average score".
+    #
+    # No score is invented or inferred from Pairwise.
+    # ============================================================
+
+    $scoreValue =
+        $null
+
+
+    foreach ($propertyName in @(
+        "score",
+        "average_score",
+        "average"
+    )) {
+
+        $property =
+            $visualQa.PSObject.Properties[
+                $propertyName
+            ]
+
+
+        if ($null -ne $property) {
+
+            $scoreValue =
+                [double]$property.Value
+
+            break
+        }
+    }
+
+
+    if ($null -eq $scoreValue) {
+
+        $scoreMatch =
+            [regex]::Match(
+                $reQaOutput,
+                '(?im)^\s*Average score\s*:\s*(?<n>[0-9]+(?:\.[0-9]+)?)\s*$'
+            )
+
+
+        if (-not $scoreMatch.Success) {
+
+            Remove-JungleRejectedArtifact `
+                -SourcePath $sourcePath `
+                -ArtifactPath $artifactPath
+
+
+            throw (
+                "Could not resolve existing PPT Visual Re-QA score."
+            )
+        }
+
+
+        $scoreValue =
+            [double]$scoreMatch.Groups["n"].Value
+    }
+
+
+    $critical =
+        [int]$visualQa.critical
+
+
+    $major =
+        [int]$visualQa.major
+
+
+    $minor =
+        [int]$visualQa.minor
+
+
+    # ============================================================
+    # 18. EXISTING HARD GATE
+    #
+    # Test-JungleHardGate requires integer Score.
+    # Floor is conservative for decimal average scores.
+    #
+    # Exact double >= 85 is also required below.
+    # ============================================================
+
+    $gateIntegerScore =
+        [int][Math]::Floor(
+            [double]$scoreValue
+        )
+
+
+    $hardGateFunctionPass =
+        Test-JungleHardGate `
+            -Score $gateIntegerScore `
+            -Critical $critical `
+            -Major $major
+
+
+    $exactScorePass =
+        (
+            [double]$scoreValue -ge 85
+        )
+
+
+    $visualScorerPass =
+        [bool]$visualQa.pass
+
+
+    $finalPass =
+        (
+            [bool]$blindQa.pass `
+            -and
+            $visualScorerPass `
+            -and
+            $hardGateFunctionPass `
+            -and
+            $exactScorePass
+        )
+
+
+    # ============================================================
+    # JUNGLE_SMART_REFLOW_HARD_GATE_POLISH_V1
+    #
+    # Hard Gate remains:
+    #   score >= 85
+    #   critical = 0
+    #   major    = 0
+    #
+    # Only one targeted revision is allowed.
+    # ============================================================
+
+    $polishClaudeCalls = 0
+    $polishPairwiseCalls = 0
+    $polishReQaCalls = 0
+    $polishTriggered = $false
+    $polishRecovered = $false
+    $polishError = ""
+    $polishArtifactPath = ""
+
+
+    $polishEligible =
+        (
+            (-not $finalPass) `
+            -and
+            [bool]$blindQa.pass `
+            -and
+            ([int]$critical -eq 0) `
+            -and
+            ([int]$major -eq 0) `
+            -and
+            ([double]$scoreValue -lt 85)
+        )
+
+
+    if ($polishEligible) {
+
+        $polishTriggered = $true
+
+        $prePolishArtifactPath =
+            $artifactPath
+
+        $prePolishScore =
+            [double]$scoreValue
+
+
+        $initialBlindCallsForPolish = 0
+
+
+        if (
+            $null -ne
+            $blindQa.PSObject.Properties["claude_calls"]
+        ) {
+
+            $initialBlindCallsForPolish =
+                [int]$blindQa.claude_calls
+        }
+
+
+        $initialReQaCallsForPolish =
+            (
+                [regex]::Matches(
+                    $reQaOutput,
+                    '(?im)^\s*Chunk score\s*:'
+                )
+            ).Count
+
+
+        try {
+
+            # ====================================================
+            # A. Frozen dependencies
+            # ====================================================
+
+            $polishRevisionPath =
+                "C:\AI\scripts\run_pptx_visual_revision_v1.ps1"
+
+            $polishReQaPath =
+                "C:\AI\scripts\run_pptx_visual_reqa_v1.ps1"
+
+            $polishGuardPath =
+                Join-Path `
+                    $root `
+                    "modules\reflow_guard.ps1"
+
+
+            if (-not (
+                Test-Path `
+                    -LiteralPath $polishRevisionPath `
+                    -PathType Leaf
+            )) {
+                throw "Frozen Revision missing."
+            }
+
+
+            if (-not (
+                Test-Path `
+                    -LiteralPath $polishReQaPath `
+                    -PathType Leaf
+            )) {
+                throw "Frozen Re-QA missing."
+            }
+
+
+            if (-not (
+                Test-Path `
+                    -LiteralPath $polishGuardPath `
+                    -PathType Leaf
+            )) {
+                throw "Mutation Boundary V2 missing."
+            }
+
+
+            if (
+                (
+                    Get-FileHash `
+                        -LiteralPath $polishRevisionPath `
+                        -Algorithm SHA256
+                ).Hash -ne
+                "DCE0E7F7EA3EAC690C3FA0926B877ECD9E33505B4EF22446BB9C7261AB9FE78C"
+            ) {
+                throw "Frozen Revision hash changed."
+            }
+
+
+            if (
+                (
+                    Get-FileHash `
+                        -LiteralPath $polishReQaPath `
+                        -Algorithm SHA256
+                ).Hash -ne
+                "1FC6759EFEE0C208932E24D7EB8D4F53681F5D7A3238D6C0FB00B2ECC4EEEA6F"
+            ) {
+                throw "Frozen Re-QA hash changed."
+            }
+
+
+            if (
+                (
+                    Get-FileHash `
+                        -LiteralPath $polishGuardPath `
+                        -Algorithm SHA256
+                ).Hash -ne
+                "215AEF4B43E17B23F7A7C14D421DDE3A43DD020C71BABB87130CCF5223EA005A"
+            ) {
+                throw "Mutation Boundary V2 hash changed."
+            }
+
+
+            # ====================================================
+            # B. Fresh original-source hash
+            #
+            # Do NOT depend on a worker-scoped sourceHashBefore.
+            # ====================================================
+
+            $polishOriginalSourceHash =
+                (
+                    Get-FileHash `
+                        -LiteralPath $sourcePath `
+                        -Algorithm SHA256
+                ).Hash
+
+
+            # ====================================================
+            # C. Frozen targeted revision - ONCE
+            # ====================================================
+
+            $polishRevisionLog =
+                Join-Path `
+                    $runDirectory `
+                    "hard_gate_polish_revision.log"
+
+
+            # JUNGLE_SMART_REFLOW_REVISION_OUTPUT_CAPTURE_V1
+            #
+            # Capture each PowerShell stream object directly.
+            # Do NOT use Out-String here: PowerShell 5.1 may
+            # wrap long Write-Host lines to console width.
+
+            $polishRevisionItems =
+                @(
+                    & $polishRevisionPath `
+                        -SourcePath $prePolishArtifactPath `
+                        -OriginalPath $sourcePath `
+                        -VisualQaPath $reQaJsonPath `
+                        -UserRequest $request *>&1
+                )
+
+
+            $polishRevisionOutput =
+                (
+                    @(
+                        $polishRevisionItems |
+                        ForEach-Object {
+                            [string]$_
+                        }
+                    ) -join "`r`n"
+                )
+
+
+            [System.IO.File]::WriteAllText(
+                $polishRevisionLog,
+                $polishRevisionOutput,
+                (
+                    New-Object System.Text.UTF8Encoding(
+                        $true
+                    )
+                )
+            )
+
+
+            $polishRevisionCalls =
+                (
+                    [regex]::Matches(
+                        $polishRevisionOutput,
+                        '(?im)^\s*PPT_VISUAL_REVISION_PLAN_CREATED\s*$'
+                    )
+                ).Count
+
+
+            if (-not (
+                [regex]::IsMatch(
+                    $polishRevisionOutput,
+                    '(?im)^\s*STATUS:\s*PPT_NATIVE_VISUAL_REVISION_COMPLETE\s*$'
+                )
+            )) {
+                throw "Visual Revision did not report COMPLETE."
+            }
+
+
+            if (
+                [regex]::IsMatch(
+                    $polishRevisionOutput,
+                    '(?im)^\s*STATUS:\s*PPT_NATIVE_VISUAL_REVISION_PARTIAL\s*$'
+                )
+            ) {
+                throw "Visual Revision reported PARTIAL."
+            }
+
+
+            $polishArtifactMatch =
+                [regex]::Match(
+                    $polishRevisionOutput,
+                    '(?im)^\s*File\s*:\s*(?<p>[A-Z]:\\[^\r\n]+?\.pptx)\s*$'
+                )
+
+
+            if (-not $polishArtifactMatch.Success) {
+                throw "Polish artifact path missing."
+            }
+
+
+            $polishArtifactPath =
+                [string]$polishArtifactMatch.Groups["p"].Value
+
+
+            if (-not (
+                Test-Path `
+                    -LiteralPath $polishArtifactPath `
+                    -PathType Leaf
+            )) {
+                throw "Polish artifact does not exist."
+            }
+
+
+            # ====================================================
+            # D. Mutation Boundary V2
+            # ====================================================
+
+            . $polishGuardPath
+
+
+            $polishBoundary =
+                Assert-JungleReflowMutationBoundary `
+                    -SourcePath $sourcePath `
+                    -ArtifactPath $polishArtifactPath `
+                    -SourceHashBefore $polishOriginalSourceHash
+
+
+            if ($null -ne $polishBoundary) {
+
+                $polishPassProperty =
+                    $polishBoundary.PSObject.Properties["pass"]
+
+
+                if ($null -ne $polishPassProperty) {
+
+                    if (-not [bool]$polishPassProperty.Value) {
+
+                        throw (
+                            "Mutation Boundary V2 rejected polish artifact."
+                        )
+                    }
+                }
+            }
+
+
+            # ====================================================
+            # E. Changed Scope
+            # ====================================================
+
+            $polishScopeDir =
+                Join-Path `
+                    $runDirectory `
+                    "changed_scope_polish"
+
+
+            if (
+                Test-Path `
+                    -LiteralPath $polishScopeDir `
+                    -PathType Container
+            ) {
+
+                Remove-Item `
+                    -LiteralPath $polishScopeDir `
+                    -Recurse `
+                    -Force
+            }
+
+
+            New-Item `
+                -ItemType Directory `
+                -Path $polishScopeDir `
+                -Force |
+            Out-Null
+
+
+            $polishScope =
+                Get-JungleChangedScope `
+                    -SourcePath $sourcePath `
+                    -ArtifactPath $polishArtifactPath `
+                    -WorkDirectory $polishScopeDir
+
+
+            if (-not [bool]$polishScope.pass) {
+                throw "Changed Scope rejected polish artifact."
+            }
+
+
+            [int[]]$polishChangedSlides =
+                @(
+                    $polishScope.changed_slides |
+                    ForEach-Object {
+                        [int]$_
+                    }
+                )
+
+
+            if ($polishChangedSlides.Count -lt 1) {
+                throw "Polish produced zero changed slides."
+            }
+
+
+            # ====================================================
+            # F. QA request
+            # ====================================================
+
+            $polishQaDecision =
+                Get-JungleSelectiveVisualQaDecision `
+                    -ChangedSlides @($polishScope.changed_slides) `
+                    -ByteIdentical ([bool]$polishScope.byte_identical) `
+                    -MaxSlidesPerCall $maxSlidesPerCall
+
+
+            if (-not [bool]$polishQaDecision.visual_qa_required) {
+                throw "Polish unexpectedly skipped Visual QA."
+            }
+
+
+            $polishQaRequestPath =
+                Join-Path `
+                    $runDirectory `
+                    "visual_qa_request_polish.json"
+
+
+            Write-JungleSelectiveVisualQaRequest `
+                -Decision $polishQaDecision `
+                -SourcePath $sourcePath `
+                -ArtifactPath $polishArtifactPath `
+                -OutputPath $polishQaRequestPath |
+            Out-Null
+
+
+            # ====================================================
+            # G. Pairwise recheck
+            # ====================================================
+
+            $polishBlindDir =
+                Join-Path `
+                    $runDirectory `
+                    "blind_pairwise_qa_polish"
+
+
+            $polishBlindQa =
+                Invoke-JungleBlindPairwiseVisualQa `
+                    -Root $root `
+                    -ChangedSlides $polishChangedSlides `
+                    -ScopeDirectory $polishScopeDir `
+                    -ArtifactPath $polishArtifactPath `
+                    -RunDirectory $polishBlindDir `
+                    -TimeoutSeconds ([int]$config.visual_qa.timeout_seconds) `
+                    -PollMilliseconds ([int]$config.watchdog.poll_milliseconds)
+
+
+            if (
+                $null -ne
+                $polishBlindQa.PSObject.Properties["claude_calls"]
+            ) {
+
+                $polishPairwiseCalls =
+                    [int]$polishBlindQa.claude_calls
+            }
+
+
+            if (-not [bool]$polishBlindQa.pass) {
+                throw "Polish failed Blind Pairwise."
+            }
+
+
+            if (
+                [int]$polishBlindQa.before_better_count -ne 0 `
+                -or
+                [int]$polishBlindQa.critical_regressions -ne 0 `
+                -or
+                [int]$polishBlindQa.major_regressions -ne 0
+            ) {
+                throw "Polish Pairwise result inconsistent."
+            }
+
+
+            # ====================================================
+            # H. Visual Re-QA again
+            # ====================================================
+
+            $polishReQaOutputDirectory =
+                Join-Path `
+                    $runDirectory `
+                    "visual_reqa_result_polish"
+
+
+            $polishReQaWorkRoot =
+                Join-Path `
+                    $runDirectory `
+                    "visual_reqa_work_polish"
+
+
+            foreach ($polishDirectory in @(
+                $polishReQaOutputDirectory,
+                $polishReQaWorkRoot
+            )) {
+
+                if (
+                    Test-Path `
+                        -LiteralPath $polishDirectory `
+                        -PathType Container
+                ) {
+
+                    Remove-Item `
+                        -LiteralPath $polishDirectory `
+                        -Recurse `
+                        -Force
+                }
+
+
+                New-Item `
+                    -ItemType Directory `
+                    -Path $polishDirectory `
+                    -Force |
+                Out-Null
+            }
+
+
+            $polishReQaLogPath =
+                Join-Path `
+                    $runDirectory `
+                    "visual_reqa_polish.log"
+
+
+            $polishReQaOutput =
+                (
+                    & $polishReQaPath `
+                        -BeforePath $sourcePath `
+                        -AfterPath $polishArtifactPath `
+                        -ChunkSize $maxSlidesPerCall `
+                        -OutputDir $polishReQaOutputDirectory `
+                        -WorkRoot $polishReQaWorkRoot *>&1 |
+                    Out-String
+                )
+
+
+            [System.IO.File]::WriteAllText(
+                $polishReQaLogPath,
+                $polishReQaOutput,
+                (
+                    New-Object System.Text.UTF8Encoding(
+                        $true
+                    )
+                )
+            )
+
+
+            $polishReQaCalls =
+                (
+                    [regex]::Matches(
+                        $polishReQaOutput,
+                        '(?im)^\s*Chunk score\s*:'
+                    )
+                ).Count
+
+
+            if (-not (
+                [regex]::IsMatch(
+                    $polishReQaOutput,
+                    '(?im)^\s*STATUS:\s*PPT_VISUAL_REQA_COMPLETE\s*$'
+                )
+            )) {
+                throw "Polish Re-QA did not report COMPLETE."
+            }
+
+
+            $polishReQaFiles =
+                @(
+                    Get-ChildItem `
+                        -LiteralPath $polishReQaOutputDirectory `
+                        -File `
+                        -Filter "*.json"
+                )
+
+
+            if ($polishReQaFiles.Count -ne 1) {
+
+                throw (
+                    "Expected one polish Re-QA JSON. Found=" +
+                    $polishReQaFiles.Count
+                )
+            }
+
+
+            $polishReQaJsonPath =
+                $polishReQaFiles[0].FullName
+
+
+            $polishVisualQa =
+                Get-Content `
+                    -LiteralPath $polishReQaJsonPath `
+                    -Raw |
+                ConvertFrom-Json
+
+
+            # ====================================================
+            # I. Score
+            # ====================================================
+
+            $polishScore =
+                $null
+
+
+            foreach ($propertyName in @(
+                "score",
+                "average_score",
+                "average"
+            )) {
+
+                $scoreProperty =
+                    $polishVisualQa.PSObject.Properties[
+                        $propertyName
+                    ]
+
+
+                if ($null -ne $scoreProperty) {
+
+                    $polishScore =
+                        [double]$scoreProperty.Value
+
+                    break
+                }
+            }
+
+
+            if ($null -eq $polishScore) {
+
+                $polishScoreMatch =
+                    [regex]::Match(
+                        $polishReQaOutput,
+                        '(?im)^\s*Average score\s*:\s*(?<n>[0-9]+(?:\.[0-9]+)?)\s*$'
+                    )
+
+
+                if (-not $polishScoreMatch.Success) {
+                    throw "Could not resolve polish score."
+                }
+
+
+                $polishScore =
+                    [double]$polishScoreMatch.Groups["n"].Value
+            }
+
+
+            $polishCritical =
+                [int]$polishVisualQa.critical
+
+            $polishMajor =
+                [int]$polishVisualQa.major
+
+            $polishMinor =
+                [int]$polishVisualQa.minor
+
+
+            # ====================================================
+            # J. SAME HARD GATE
+            # ====================================================
+
+            $polishGateIntegerScore =
+                [int][Math]::Floor(
+                    [double]$polishScore
+                )
+
+
+            $polishHardGateFunctionPass =
+                Test-JungleHardGate `
+                    -Score $polishGateIntegerScore `
+                    -Critical $polishCritical `
+                    -Major $polishMajor
+
+
+            $polishExactScorePass =
+                (
+                    [double]$polishScore -ge 85
+                )
+
+
+            $polishVisualScorerPass =
+                [bool]$polishVisualQa.pass
+
+
+            $polishFinalPass =
+                (
+                    [bool]$polishBlindQa.pass `
+                    -and
+                    $polishVisualScorerPass `
+                    -and
+                    $polishHardGateFunctionPass `
+                    -and
+                    $polishExactScorePass
+                )
+
+
+            # ====================================================
+            # K. PowerShell 5.1-safe status variables
+            # ====================================================
+
+            $polishRecordStatus =
+                "REJECT"
+
+
+            if ($polishFinalPass) {
+
+                $polishRecordStatus =
+                    "PASS"
+            }
+
+
+            $polishGateLabel =
+                "REJECT"
+
+
+            if ($polishFinalPass) {
+
+                $polishGateLabel =
+                    "PASS"
+            }
+
+
+            # ====================================================
+            # L. Audit
+            # ====================================================
+
+            $polishRecordPath =
+                Join-Path `
+                    $runDirectory `
+                    "hard_gate_polish.json"
+
+
+            $polishRecord =
+                [ordered]@{
+
+                    protocol =
+                        "JUNGLE_SMART_REFLOW_HARD_GATE_POLISH_V1"
+
+                    initial_score =
+                        [double]$prePolishScore
+
+                    polished_score =
+                        [double]$polishScore
+
+                    critical =
+                        [int]$polishCritical
+
+                    major =
+                        [int]$polishMajor
+
+                    minor =
+                        [int]$polishMinor
+
+                    changed_slides =
+                        @($polishChangedSlides)
+
+                    revision_artifact =
+                        $polishArtifactPath
+
+                    revision_log =
+                        $polishRevisionLog
+
+                    pairwise_directory =
+                        $polishBlindDir
+
+                    visual_reqa_json =
+                        $polishReQaJsonPath
+
+                    visual_reqa_log =
+                        $polishReQaLogPath
+
+                    hard_gate_required_score =
+                        85
+
+                    hard_gate_passed =
+                        [bool]$polishFinalPass
+
+                    revision_cycles =
+                        1
+
+                    status =
+                        $polishRecordStatus
+                }
+
+
+            [System.IO.File]::WriteAllText(
+                $polishRecordPath,
+                (
+                    $polishRecord |
+                    ConvertTo-Json -Depth 12
+                ),
+                (
+                    New-Object System.Text.UTF8Encoding(
+                        $false
+                    )
+                )
+            )
+
+
+            # ====================================================
+            # M. Promote candidate
+            #
+            # If polish still fails, normal downstream reject
+            # deletes the promoted polish candidate.
+            # ====================================================
+
+            Remove-JungleRejectedArtifact `
+                -SourcePath $sourcePath `
+                -ArtifactPath $prePolishArtifactPath
+
+
+            $artifactPath =
+                $polishArtifactPath
+
+            $scopeDir =
+                $polishScopeDir
+
+            $scope =
+                $polishScope
+
+            [int[]]$changedSlides =
+                @($polishChangedSlides)
+
+            $qaDecision =
+                $polishQaDecision
+
+            $qaRequestPath =
+                $polishQaRequestPath
+
+            $blindQaDirectory =
+                $polishBlindDir
+
+            $blindQa =
+                $polishBlindQa
+
+            $reQaOutputDirectory =
+                $polishReQaOutputDirectory
+
+            $reQaWorkRoot =
+                $polishReQaWorkRoot
+
+            $reQaLogPath =
+                $polishReQaLogPath
+
+            $reQaOutput =
+                $polishReQaOutput
+
+            $reQaJsonPath =
+                $polishReQaJsonPath
+
+            $visualQa =
+                $polishVisualQa
+
+            $scoreValue =
+                [double]$polishScore
+
+            $critical =
+                [int]$polishCritical
+
+            $major =
+                [int]$polishMajor
+
+            $minor =
+                [int]$polishMinor
+
+            $gateIntegerScore =
+                $polishGateIntegerScore
+
+            $hardGateFunctionPass =
+                $polishHardGateFunctionPass
+
+            $exactScorePass =
+                $polishExactScorePass
+
+            $visualScorerPass =
+                $polishVisualScorerPass
+
+            $finalPass =
+                $polishFinalPass
+
+
+            [System.IO.File]::WriteAllText(
+                $scopeJsonPath,
+                (
+                    $scope |
+                    ConvertTo-Json -Depth 12
+                ),
+                (
+                    New-Object System.Text.UTF8Encoding(
+                        $false
+                    )
+                )
+            )
+
+
+            # Existing accounting now sees NEW Pairwise + NEW Re-QA.
+            # Add old Pairwise + old Re-QA + Revision.
+
+            $polishClaudeCalls =
+                (
+                    $polishRevisionCalls +
+                    $initialBlindCallsForPolish +
+                    $initialReQaCallsForPolish
+                )
+
+
+            $polishRecovered =
+                [bool]$polishFinalPass
+
+
+            Write-Host ""
+            Write-Host "========================================"
+            Write-Host " HARD GATE POLISH RESULT"
+            Write-Host "========================================"
+            Write-Host "Initial score         :" $prePolishScore
+            Write-Host "Polished score        :" $scoreValue
+            Write-Host "Critical              :" $critical
+            Write-Host "Major                 :" $major
+            Write-Host "Minor                 :" $minor
+            Write-Host "Revision cycles       : 1"
+            Write-Host "Hard Gate             :" $polishGateLabel
+            Write-Host ""
+
+
+            if ($finalPass) {
+
+                Write-Host "STATUS : JUNGLE_REFLOW_HARD_GATE_POLISH_RECOVERED"
+            }
+            else {
+
+                Write-Host "STATUS : JUNGLE_REFLOW_HARD_GATE_POLISH_REJECTED"
+            }
+
+
+            Write-Host ""
+        }
+        catch {
+
+            $polishError =
+                $_.Exception.Message
+
+
+            if (
+                (-not [string]::IsNullOrWhiteSpace(
+                    $polishArtifactPath
+                )) `
+                -and
+                (
+                    Test-Path `
+                        -LiteralPath $polishArtifactPath `
+                        -PathType Leaf
+                )
+            ) {
+
+                Remove-JungleRejectedArtifact `
+                    -SourcePath $sourcePath `
+                    -ArtifactPath $polishArtifactPath
+            }
+
+
+            $polishClaudeCalls +=
+                (
+                    $polishPairwiseCalls +
+                    $polishReQaCalls
+                )
+
+
+            Write-Host ""
+            Write-Host "HARD GATE POLISH failed."
+            Write-Host (
+                "Reason : " +
+                $polishError
+            )
+            Write-Host ""
+        }
+    }
+
+    # ============================================================
+    # 19. AI CALL ACCOUNTING
+    # ============================================================
+
+    $executorClaudeCalls =
+        (
+            [regex]::Matches(
+                $executorOutput,
+                '(?im)^\s*PPT_REFLOW_PLAN_CREATED\s*$'
+            )
+        ).Count
+
+
+    $blindClaudeCalls =
+        0
+
+
+    if (
+        $null -ne
+        $blindQa.PSObject.Properties[
+            "claude_calls"
+        ]
+    ) {
+
+        $blindClaudeCalls =
+            [int]$blindQa.claude_calls
+    }
+
+
+    $reQaClaudeCalls =
+        (
+            [regex]::Matches(
+                $reQaOutput,
+                '(?im)^\s*Chunk score\s*:'
+            )
+        ).Count
+
+
+    $totalClaudeCalls =
+        (
+            $executorClaudeCalls +
+            $blindClaudeCalls +
+            $reQaClaudeCalls +
+            $polishClaudeCalls
+        )
+
+
+    # ============================================================
+    # 20. HARD GATE REJECT
+    # ============================================================
+
+    if (-not $finalPass) {
+
+        Remove-JungleRejectedArtifact `
+            -SourcePath $sourcePath `
+            -ArtifactPath $artifactPath
+
+
+        $rejectResult =
+            [ordered]@{
+
+                protocol =
+                    "JUNGLE_SMART_REFLOW_WORKER_RESULT_V2"
+
+                status =
+                    "REFLOW_HARD_GATE_REJECTED"
+
+                accepted =
+                    $false
+
+                pipeline_complete =
+                    $false
+
+                artifact_removed =
+                    $true
+
+                score =
+                    [double]$scoreValue
+
+                critical =
+                    $critical
+
+                major =
+                    $major
+
+                minor =
+                    $minor
+
+                hard_gate_required_score =
+                    85
+
+                hard_gate_passed =
+                    $false
+
+                blind_pairwise_passed =
+                    [bool]$blindQa.pass
+
+                visual_reqa_passed =
+                    $visualScorerPass
+
+                changed_count =
+                    [int]$scope.changed_count
+
+                changed_slides =
+                    $changedSlides
+
+                claude_calls =
+                    $totalClaudeCalls
+
+                visual_reqa_json =
+                    $reQaJsonPath
+
+                message =
+                    "REFLOW artifact was deleted because the unchanged Hard Gate did not pass."
+            }
+
+
+        Write-JungleReflowWorkerResult `
+            -Path $resultPath `
+            -Result $rejectResult
+
+
+        Write-Host (
+            "STATUS : JUNGLE_REFLOW_HARD_GATE_REJECTED"
+        )
+
+
+        exit 5
+    }
+
+
+    # ============================================================
+    # 21. VERIFIED
+    # ============================================================
+
+    $artifactHash =
+        (
+            Get-FileHash `
+                -LiteralPath $artifactPath `
+                -Algorithm SHA256
+        ).Hash
+
+
+    $verifiedResult =
+        [ordered]@{
+
+            protocol =
+                "JUNGLE_SMART_REFLOW_WORKER_RESULT_V2"
+
+            status =
+                "REFLOW_VERIFIED"
+
+            accepted =
+                $true
+
+            pipeline_complete =
+                $true
+
+            source_path =
+                $sourcePath
+
+            source_sha256 =
+                $sourceHashBefore
+
+            artifact_path =
+                $artifactPath
+
+            artifact_sha256 =
+                $artifactHash
+
+            mutation_boundary =
+                "PASS"
+
+            changed_scope =
+                "PASS"
+
+            changed_count =
+                [int]$scope.changed_count
+
+            changed_slides =
+                $changedSlides
+
+            blind_pairwise =
+                "PASS"
+
+            before_better_count =
+                [int]$blindQa.before_better_count
+
+            critical_regressions =
+                [int]$blindQa.critical_regressions
+
+            major_regressions =
+                [int]$blindQa.major_regressions
+
+            score =
+                [double]$scoreValue
+
+            critical =
+                $critical
+
+            major =
+                $major
+
+            minor =
+                $minor
+
+            visual_reqa =
+                "PASS"
+
+            hard_gate_required_score =
+                85
+
+            hard_gate_passed =
+                $true
+
+            claude_calls =
+                $totalClaudeCalls
+
+            codex_calls =
+                0
+
+            executor_log =
+                $executorLogPath
+
+            changed_scope_json =
+                $scopeJsonPath
+
+            selective_qa_request =
+                $qaRequestPath
+
+            blind_pairwise_directory =
+                $blindQaDirectory
+
+            visual_reqa_json =
+                $reQaJsonPath
+
+            visual_reqa_log =
+                $reQaLogPath
+        }
+
+
+    Write-JungleReflowWorkerResult `
+        -Path $resultPath `
+        -Result $verifiedResult
+
+
+    Write-Host (
+        "STATUS : JUNGLE_REFLOW_VERIFIED"
+    )
+
+
+    exit 0
+}
+catch {
+
+    if (
+        -not [string]::IsNullOrWhiteSpace(
+            $artifactPath
+        ) `
+        -and
+        -not [string]::IsNullOrWhiteSpace(
+            $sourcePath
+        )
+    ) {
+
+        try {
+
+            Remove-JungleRejectedArtifact `
+                -SourcePath $sourcePath `
+                -ArtifactPath $artifactPath
+        }
+        catch {}
+    }
+
+
+    if (-not [string]::IsNullOrWhiteSpace(
+        $resultPath
+    )) {
+
+        try {
+
+            $failure =
+                [ordered]@{
+
+                    protocol =
+                        "JUNGLE_SMART_REFLOW_WORKER_RESULT_V2"
+
+                    status =
+                        "FAIL"
+
+                    accepted =
+                        $false
+
+                    pipeline_complete =
+                        $false
+
+                    artifact_removed =
+                        $true
+
+                    error =
+                        $_.Exception.Message
+                }
+
+
+            Write-JungleReflowWorkerResult `
+                -Path $resultPath `
+                -Result $failure
+        }
+        catch {}
+    }
+
+
+    Write-Error $_.Exception.Message
+
+    exit 1
+}

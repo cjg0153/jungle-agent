@@ -1,0 +1,2117 @@
+﻿# JUNGLE_SMART_REFLOW_EXECUTOR_ACTIONS_V1
+#
+# ACTIONS
+#   modify_existing
+#   z_order
+#   add_decorative
+#   delete_created
+#
+# SAFETY
+#   ORIGINAL SHAPE DELETE : FORBIDDEN
+#   TEXT CONTENT WRITE    : FORBIDDEN
+#   GROUP / UNGROUP       : FORBIDDEN
+#   SOURCE OVERWRITE      : FORBIDDEN
+#
+# REFLOW execution is validated by:
+#   JUNGLE_SMART_REFLOW_MUTATION_BOUNDARY_V1
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$FilePath,
+
+    [Parameter(Mandatory=$true)]
+    [string]$UserRequest,
+
+    [int]$SlideLimit = 0,
+
+    [int]$ChunkSize = 8
+)
+
+$ErrorActionPreference = "Stop"
+
+$outputDir =
+    "C:\AI\work\output"
+
+$tempDir =
+    "C:\AI\work\temp"
+
+$claudePath =
+    "C:\Users\Zephyrus G14\.local\bin\claude.exe"
+
+
+# ============================================================
+# JUNGLE_SMART_PPT_REFLOW_EXECUTOR_V1
+#
+# Claude = Visual Designer
+# PowerPoint COM = Executor
+#
+# IMPORTANT:
+# - Existing slides are preserved.
+# - Existing text/content is NOT rewritten.
+# - Existing images/media are NOT deleted.
+# - Existing shapes are NOT deleted.
+# - Claude can only change geometry/style of existing shapes.
+# ============================================================
+
+
+# ============================================================
+# 1. Validate
+# ============================================================
+
+if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+    throw "PPT file not found: $FilePath"
+}
+
+if (-not (Test-Path -LiteralPath $claudePath -PathType Leaf)) {
+    throw "Claude executable not found: $claudePath"
+}
+
+$ext =
+    [System.IO.Path]::GetExtension(
+        $FilePath
+    ).ToLowerInvariant()
+
+if ($ext -notin @(".ppt",".pptx")) {
+    throw "Only PPT/PPTX is supported."
+}
+
+if ($ChunkSize -lt 1) {
+    throw "ChunkSize must be >= 1."
+}
+
+foreach ($dir in @(
+    $outputDir,
+    $tempDir
+)) {
+
+    if (-not (Test-Path -LiteralPath $dir)) {
+
+        New-Item `
+            -ItemType Directory `
+            -Path $dir `
+            -Force |
+            Out-Null
+    }
+}
+
+
+# ============================================================
+# 2. Paths
+# ============================================================
+
+$stamp =
+    Get-Date -Format "yyyyMMdd_HHmmss"
+
+$baseName =
+    [System.IO.Path]::GetFileNameWithoutExtension(
+        $FilePath
+    )
+
+$outputPath =
+    Join-Path `
+        $outputDir `
+        "${baseName}_reflow_v1_${stamp}.pptx"
+
+$workDir =
+    Join-Path `
+        $tempDir `
+        "ppt_reflow_v1_${stamp}"
+
+New-Item `
+    -ItemType Directory `
+    -Path $workDir `
+    -Force |
+    Out-Null
+
+$imageDir =
+    Join-Path `
+        $workDir `
+        "slides"
+
+New-Item `
+    -ItemType Directory `
+    -Path $imageDir `
+    -Force |
+    Out-Null
+
+$metadataPath =
+    Join-Path `
+        $workDir `
+        "shape_metadata.json"
+
+$combinedPlanPath =
+    Join-Path `
+        $workDir `
+        "combined_reflow_plan.json"
+
+
+# ============================================================
+    # ============================================================
+    # JUNGLE_SMART_REFLOW_EXECUTOR_BOUNDARY_PRECHECK_V1
+    # ============================================================
+
+    $smartRoot =
+        Split-Path `
+            -Parent $PSScriptRoot
+
+
+    $reflowGuardPath =
+        Join-Path `
+            $smartRoot `
+            "modules\reflow_guard.ps1"
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $reflowGuardPath `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "REFLOW Mutation Boundary module missing: " +
+            $reflowGuardPath
+        )
+    }
+
+
+    . $reflowGuardPath
+
+
+    $sourceHashBefore =
+        Get-JungleSha256 `
+            -Path $FilePath
+
+# 3. Copy source
+# ============================================================
+
+Copy-Item `
+    -LiteralPath $FilePath `
+    -Destination $outputPath `
+    -Force
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+function Release-ComObjectSafe {
+
+    param($Object)
+
+    if ($null -ne $Object) {
+
+        try {
+
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject(
+                $Object
+            ) | Out-Null
+        }
+        catch {}
+    }
+}
+
+
+function Get-SafeShapeText {
+
+    param($Shape)
+
+    try {
+
+        if (
+            $Shape.HasTextFrame -eq -1 `
+            -and $Shape.TextFrame.HasText -eq -1
+        ) {
+
+            $t =
+                [string]$Shape.TextFrame.TextRange.Text
+
+            if ($t.Length -gt 1500) {
+
+                $t =
+                    $t.Substring(0,1500) +
+                    "...[TRUNCATED]"
+            }
+
+            return $t
+        }
+    }
+    catch {}
+
+    return ""
+}
+
+
+function Get-ShapeById {
+
+    param(
+        $Slide,
+        [int]$ShapeId
+    )
+
+    foreach ($shape in $Slide.Shapes) {
+
+        try {
+
+            if ([int]$shape.Id -eq $ShapeId) {
+                return $shape
+            }
+        }
+        catch {}
+    }
+
+    return $null
+}
+
+
+function Has-PlanProperty {
+
+    param(
+        $Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $false
+    }
+
+    $p =
+        $Object.PSObject.Properties[$Name]
+
+    if ($null -eq $p) {
+        return $false
+    }
+
+    return $null -ne $p.Value
+}
+
+
+# ============================================================
+# 4. Extract slide images + shape geometry
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================"
+Write-Host " JUNGLE VISUAL ANALYSIS"
+Write-Host "========================================"
+
+$ppt =
+    $null
+
+$pres =
+    $null
+
+$slidesMeta =
+    @()
+
+try {
+
+    $ppt =
+        New-Object -ComObject PowerPoint.Application
+
+    $pres =
+        $ppt.Presentations.Open(
+            $outputPath,
+            $true,
+            $false,
+            $false
+        )
+
+    $slideCount =
+        [int]$pres.Slides.Count
+
+    $slideWidth =
+        [double]$pres.PageSetup.SlideWidth
+
+    $slideHeight =
+        [double]$pres.PageSetup.SlideHeight
+
+    if (
+        $SlideLimit -gt 0 `
+        -and $SlideLimit -lt $slideCount
+    ) {
+
+        $analysisCount =
+            $SlideLimit
+    }
+    else {
+
+        $analysisCount =
+            $slideCount
+    }
+
+    Write-Host "Slides total :" $slideCount
+    Write-Host "Slides target:" $analysisCount
+    Write-Host "Slide size   :" $slideWidth "x" $slideHeight
+
+
+    for ($s = 1; $s -le $analysisCount; $s++) {
+
+        $slide =
+            $pres.Slides.Item($s)
+
+        $pngPath =
+            Join-Path `
+                $imageDir `
+                ("slide_{0:D3}.png" -f $s)
+
+        $slide.Export(
+            $pngPath,
+            "PNG",
+            1600,
+            900
+        )
+
+        $shapeMeta =
+            @()
+
+        foreach ($shape in $slide.Shapes) {
+
+            $item =
+                [ordered]@{
+                    shape_id   = [int]$shape.Id
+                    shape_name = [string]$shape.Name
+                    shape_type = [int]$shape.Type
+
+                    left   = [math]::Round([double]$shape.Left,2)
+                    top    = [math]::Round([double]$shape.Top,2)
+                    width  = [math]::Round([double]$shape.Width,2)
+                    height = [math]::Round([double]$shape.Height,2)
+
+                    rotation =
+                        [math]::Round(
+                            [double]$shape.Rotation,
+                            2
+                        )
+
+                    text =
+                        Get-SafeShapeText `
+                            -Shape $shape
+                }
+
+
+            # ------------------------------------------------
+            # Text style
+            # ------------------------------------------------
+
+            try {
+
+                if (
+                    $shape.HasTextFrame -eq -1 `
+                    -and $shape.TextFrame.HasText -eq -1
+                ) {
+
+                    $tr =
+                        $shape.TextFrame.TextRange
+
+                    $item.font_size =
+                        [math]::Round(
+                            [double]$tr.Font.Size,
+                            2
+                        )
+
+                    $item.font_bold =
+                        ([int]$tr.Font.Bold -eq -1)
+
+                    $item.font_name =
+                        [string]$tr.Font.Name
+
+                    $item.font_rgb =
+                        [int]$tr.Font.Color.RGB
+
+                    $item.alignment =
+                        [int]$tr.ParagraphFormat.Alignment
+
+                    $item.margin_left =
+                        [math]::Round(
+                            [double]$shape.TextFrame.MarginLeft,
+                            2
+                        )
+
+                    $item.margin_right =
+                        [math]::Round(
+                            [double]$shape.TextFrame.MarginRight,
+                            2
+                        )
+
+                    $item.margin_top =
+                        [math]::Round(
+                            [double]$shape.TextFrame.MarginTop,
+                            2
+                        )
+
+                    $item.margin_bottom =
+                        [math]::Round(
+                            [double]$shape.TextFrame.MarginBottom,
+                            2
+                        )
+                }
+            }
+            catch {}
+
+
+            # ------------------------------------------------
+            # Fill
+            # ------------------------------------------------
+
+            try {
+
+                $item.fill_visible =
+                    ([int]$shape.Fill.Visible -eq -1)
+
+                $item.fill_rgb =
+                    [int]$shape.Fill.ForeColor.RGB
+
+                $item.fill_transparency =
+                    [math]::Round(
+                        [double]$shape.Fill.Transparency,
+                        3
+                    )
+            }
+            catch {}
+
+
+            # ------------------------------------------------
+            # Line
+            # ------------------------------------------------
+
+            try {
+
+                $item.line_visible =
+                    ([int]$shape.Line.Visible -eq -1)
+
+                $item.line_rgb =
+                    [int]$shape.Line.ForeColor.RGB
+
+                $item.line_weight =
+                    [math]::Round(
+                        [double]$shape.Line.Weight,
+                        2
+                    )
+            }
+            catch {}
+
+
+            $shapeMeta +=
+                [pscustomobject]$item
+        }
+
+
+        $slidesMeta +=
+            [pscustomobject]@{
+                slide_number = $s
+                image_path   = $pngPath
+                shapes       = $shapeMeta
+            }
+
+        Write-Host (
+            "Exported slide {0}/{1} | shapes={2}" `
+            -f `
+            $s,
+            $analysisCount,
+            $shapeMeta.Count
+        )
+    }
+}
+finally {
+
+    if ($null -ne $pres) {
+
+        try {
+            $pres.Close()
+        }
+        catch {}
+
+        Release-ComObjectSafe $pres
+    }
+
+    if ($null -ne $ppt) {
+
+        try {
+            $ppt.Quit()
+        }
+        catch {}
+
+        Release-ComObjectSafe $ppt
+    }
+
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+}
+
+
+$metadata =
+    [ordered]@{
+        source_file  = $FilePath
+        output_file  = $outputPath
+        slide_count  = $slideCount
+        target_count = $analysisCount
+        slide_width  = $slideWidth
+        slide_height = $slideHeight
+        slides       = $slidesMeta
+    }
+
+
+$utf8Bom =
+    New-Object System.Text.UTF8Encoding($true)
+
+[System.IO.File]::WriteAllText(
+    $metadataPath,
+    (
+        $metadata |
+        ConvertTo-Json -Depth 12
+    ),
+    $utf8Bom
+)
+
+
+# ============================================================
+# 5. Claude visual planning - chunked
+# ============================================================
+
+$allOperations =
+    @()
+
+$chunkIndex =
+    0
+
+
+for (
+    $chunkStart = 1;
+    $chunkStart -le $analysisCount;
+    $chunkStart += $ChunkSize
+) {
+
+    $chunkIndex++
+
+    $chunkEnd =
+        [Math]::Min(
+            $analysisCount,
+            $chunkStart + $ChunkSize - 1
+        )
+
+    $chunkSlides =
+        @(
+            $slidesMeta |
+            Where-Object {
+                $_.slide_number -ge $chunkStart `
+                -and $_.slide_number -le $chunkEnd
+            }
+        )
+
+    $chunkMetaPath =
+        Join-Path `
+            $workDir `
+            (
+                "chunk_{0:D2}_metadata.json" `
+                -f $chunkIndex
+            )
+
+    $chunkPlanPath =
+        Join-Path `
+            $workDir `
+            (
+                "chunk_{0:D2}_plan.json" `
+                -f $chunkIndex
+            )
+
+    $instructionPath =
+        Join-Path `
+            $workDir `
+            (
+                "chunk_{0:D2}_instruction.txt" `
+                -f $chunkIndex
+            )
+
+
+    $chunkMeta =
+        [ordered]@{
+            slide_width  = $slideWidth
+            slide_height = $slideHeight
+            slides       = $chunkSlides
+        }
+
+
+    [System.IO.File]::WriteAllText(
+        $chunkMetaPath,
+        (
+            $chunkMeta |
+            ConvertTo-Json -Depth 12
+        ),
+        $utf8Bom
+    )
+
+
+    $imageList =
+        (
+            $chunkSlides |
+            ForEach-Object {
+                "Slide $($_.slide_number): $($_.image_path)"
+            }
+        ) -join "`r`n"
+
+
+    $instruction = @"
+You are Jungle's PowerPoint visual designer.
+
+Your job is to IMPROVE THE EXISTING SLIDES visually.
+
+This is NOT a rewrite.
+This is NOT a summary.
+This is NOT a new short deck.
+
+USER REQUEST:
+$UserRequest
+
+
+SLIDES:
+$chunkStart through $chunkEnd
+
+SLIDE SIZE:
+width=$slideWidth
+height=$slideHeight
+
+
+READ THIS METADATA JSON:
+$chunkMetaPath
+
+
+READ THESE SLIDE PNG IMAGES:
+$imageList
+
+
+IMPORTANT SAFETY RULES:
+
+1. Preserve every slide.
+2. Preserve ALL substantive text.
+3. Preserve all images, screenshots, diagrams, tables, videos and media.
+4. Do NOT delete shapes.
+5. Do NOT add shapes.
+6. Do NOT change shape text.
+7. Do NOT change slide count.
+8. Do NOT redesign the content concept.
+9. Work only with existing shape IDs.
+
+Your role is visual refinement only.
+
+Improve where useful:
+- information hierarchy
+- alignment
+- spacing
+- margins
+- size balance
+- visual grouping
+- headline emphasis
+- typography hierarchy
+- readability
+- color consistency
+- box/fill styling
+- line styling
+- image sizing / positioning
+- whitespace
+
+Avoid unnecessary changes.
+Do not move a shape simply because you can.
+Preserve good existing design.
+
+Use the PNGs as the primary visual reference.
+Use the metadata for exact geometry and Shape IDs.
+
+
+OUTPUT:
+
+Save VALID UTF-8 JSON exactly to:
+
+$chunkPlanPath
+
+
+REFLOW V1 OVERRIDE:
+
+The following REFLOW rules supersede any earlier SAFE-only statement
+that limits operations to existing-shape geometry/style.
+
+REFLOW still preserves all information-bearing content.
+
+SCHEMA:
+
+{
+  "operations": [
+    {
+      "action": "modify_existing",
+      "slide_number": 1,
+      "shape_id": 5,
+
+      "left": 100.0,
+      "top": 120.0,
+      "width": 500.0,
+      "height": 80.0,
+
+      "font_size": 28.0,
+      "font_bold": true,
+      "font_rgb": 16777215,
+      "alignment": 1,
+
+      "fill_rgb": 255,
+      "fill_transparency": 0.0,
+
+      "line_visible": false,
+      "line_rgb": 0,
+      "line_weight": 1.0,
+
+      "margin_left": 8.0,
+      "margin_right": 8.0,
+      "margin_top": 4.0,
+      "margin_bottom": 4.0,
+
+      "reason": "visual reflow reason"
+    },
+
+    {
+      "action": "z_order",
+      "slide_number": 1,
+      "shape_id": 5,
+      "z_order": "bring_to_front",
+      "reason": "visual hierarchy reason"
+    },
+
+    {
+      "action": "add_decorative",
+      "slide_number": 1,
+      "ref_id": "decor_01",
+      "shape_type": "rectangle",
+
+      "left": 40.0,
+      "top": 40.0,
+      "width": 300.0,
+      "height": 20.0,
+
+      "fill_rgb": 16777215,
+      "fill_transparency": 0.25,
+
+      "line_visible": false,
+      "line_rgb": 0,
+      "line_weight": 1.0,
+
+      "reason": "non-text decorative element"
+    },
+
+    {
+      "action": "delete_created",
+      "slide_number": 1,
+      "ref_id": "decor_01",
+      "reason": "remove a decorative shape created earlier in this plan"
+    }
+  ]
+}
+
+REFLOW V1 RULES:
+
+- Every operation requires:
+  action
+  slide_number
+  reason
+
+- action may only be:
+  modify_existing
+  z_order
+  add_decorative
+  delete_created
+
+- Never change text content.
+- Never rewrite existing wording.
+- Never translate text.
+- Never summarize text.
+- Never delete existing text.
+- Never add text.
+- Never add slides.
+- Never delete slides.
+- Never reorder slides.
+- Never group shapes.
+- Never ungroup shapes.
+- Never overwrite the source presentation.
+
+- modify_existing:
+  shape_id must refer to a real existing shape.
+  Geometry and visual styling may change.
+  Text content may not change.
+
+- z_order:
+  Target may be an existing shape_id
+  or a ref_id created earlier in this plan.
+
+  Allowed commands:
+  bring_to_front
+  send_to_back
+  bring_forward
+  send_backward
+
+- add_decorative:
+  Creates a NON-TEXT decorative shape only.
+
+  ref_id must be unique.
+
+  Allowed shape_type:
+  rectangle
+  rounded_rectangle
+  oval
+
+  Decorative shapes must not introduce new information.
+
+- delete_created:
+  May delete only a ref_id created earlier
+  by add_decorative in this same plan.
+
+  Never delete an original presentation shape.
+
+- Operation order matters.
+- Never invent an existing Shape ID.
+- Keep shapes inside slide bounds.
+- Width and height must remain positive.
+- Prefer restrained professional executive presentation design.
+- Improve hierarchy, alignment, whitespace and balance.
+- If a slide is already visually strong, zero operations is valid.
+
+When complete output only:
+PPT_REFLOW_PLAN_CREATED
+"@
+
+
+    [System.IO.File]::WriteAllText(
+        $instructionPath,
+        $instruction,
+        $utf8Bom
+    )
+
+
+    Write-Host ""
+    Write-Host "----------------------------------------"
+    Write-Host (
+        " CLAUDE VISUAL PLAN {0} | Slides {1}-{2}" `
+        -f `
+        $chunkIndex,
+        $chunkStart,
+        $chunkEnd
+    )
+    Write-Host "----------------------------------------"
+
+
+    $claudeRequest =
+        "Read the instruction file at $instructionPath and execute it exactly. Read the local PNG slide images and JSON metadata specified there. Do not use web search, Google Drive, connectors, or external sources. Write the requested JSON plan. When finished output only PPT_REFLOW_PLAN_CREATED."
+
+
+    & $claudePath `
+        -p $claudeRequest `
+        --allowedTools "Read" "Write"
+
+
+    if (-not (Test-Path -LiteralPath $chunkPlanPath -PathType Leaf)) {
+
+        throw "Claude visual plan was not created: $chunkPlanPath"
+    }
+
+
+    $chunkPlan =
+        Get-Content `
+            -LiteralPath $chunkPlanPath `
+            -Raw `
+            -Encoding UTF8 |
+        ConvertFrom-Json
+
+
+    if ($null -eq $chunkPlan.operations) {
+
+        throw "Visual plan does not contain operations: $chunkPlanPath"
+    }
+
+
+    foreach ($op in @($chunkPlan.operations)) {
+
+        $allOperations +=
+            $op
+    }
+
+
+    Write-Host (
+        "Plan operations : {0}" `
+        -f `
+        @($chunkPlan.operations).Count
+    )
+}
+
+
+$combinedPlan =
+    [ordered]@{
+        source_file =
+            $FilePath
+
+        output_file =
+            $outputPath
+
+        operations =
+            $allOperations
+    }
+
+
+[System.IO.File]::WriteAllText(
+    $combinedPlanPath,
+    (
+        $combinedPlan |
+        ConvertTo-Json -Depth 12
+    ),
+    $utf8Bom
+)
+
+
+Write-Host ""
+Write-Host "TOTAL VISUAL OPERATIONS :" $allOperations.Count
+
+
+# ============================================================
+# 6. Apply visual plan with PowerPoint COM
+# ============================================================
+
+$ppt =
+    $null
+
+$pres =
+    $null
+
+$applied =
+    0
+
+$failed =
+    @()
+
+
+try {
+
+    $ppt =
+        New-Object -ComObject PowerPoint.Application
+
+    $pres =
+        $ppt.Presentations.Open(
+            $outputPath,
+            $false,
+            $false,
+            $false
+        )
+
+
+    if ([int]$pres.Slides.Count -ne $slideCount) {
+
+        throw "Slide count changed before apply."
+    }
+
+
+        # JUNGLE_SMART_REFLOW_CREATED_SHAPE_REGISTRY_V1
+
+        $createdShapes =
+            @{}
+
+    foreach ($op in $allOperations) {
+
+        try {
+                # =================================================
+                # JUNGLE_SMART_REFLOW_ACTION_DISPATCH_V1
+                # =================================================
+
+                if (-not (
+                    Has-PlanProperty `
+                        $op `
+                        "action"
+                )) {
+
+                    throw (
+                        "REFLOW operation missing action."
+                    )
+                }
+
+
+                $reflowAction =
+                    (
+                        [string]$op.action
+                    ).ToLowerInvariant()
+
+
+                if (-not (
+                    Has-PlanProperty `
+                        $op `
+                        "slide_number"
+                )) {
+
+                    throw (
+                        "REFLOW operation missing slide_number."
+                    )
+                }
+
+
+                $reflowSlideNumber =
+                    [int]$op.slide_number
+
+
+                if (
+                    $reflowSlideNumber -lt 1 `
+                    -or
+                    $reflowSlideNumber -gt [int]$pres.Slides.Count
+                ) {
+
+                    throw (
+                        "Invalid REFLOW slide number."
+                    )
+                }
+
+
+                # -------------------------------------------------
+                # ADD DECORATIVE
+                # -------------------------------------------------
+
+                if (
+                    $reflowAction -eq
+                    "add_decorative"
+                ) {
+
+                    foreach ($requiredProperty in @(
+                        "ref_id",
+                        "shape_type",
+                        "left",
+                        "top",
+                        "width",
+                        "height"
+                    )) {
+
+                        if (-not (
+                            Has-PlanProperty `
+                                $op `
+                                $requiredProperty
+                        )) {
+
+                            throw (
+                                "add_decorative missing property: " +
+                                $requiredProperty
+                            )
+                        }
+                    }
+
+
+                    $refId =
+                        [string]$op.ref_id
+
+
+                    if (
+                        [string]::IsNullOrWhiteSpace(
+                            $refId
+                        )
+                    ) {
+
+                        throw (
+                            "Decorative ref_id is empty."
+                        )
+                    }
+
+
+                    if (
+                        $createdShapes.ContainsKey(
+                            $refId
+                        )
+                    ) {
+
+                        throw (
+                            "Duplicate decorative ref_id: " +
+                            $refId
+                        )
+                    }
+
+
+                    $shapeTypeName =
+                        (
+                            [string]$op.shape_type
+                        ).ToLowerInvariant()
+
+
+                    $shapeTypeCode =
+                        0
+
+
+                    switch ($shapeTypeName) {
+
+                        "rectangle" {
+
+                            $shapeTypeCode =
+                                1
+                        }
+
+
+                        "rounded_rectangle" {
+
+                            $shapeTypeCode =
+                                5
+                        }
+
+
+                        "oval" {
+
+                            $shapeTypeCode =
+                                9
+                        }
+
+
+                        default {
+
+                            throw (
+                                "Unsupported decorative shape_type: " +
+                                $shapeTypeName
+                            )
+                        }
+                    }
+
+
+                    $reflowSlide =
+                        $pres.Slides.Item(
+                            $reflowSlideNumber
+                        )
+
+
+                    $decorLeft =
+                        [double]$op.left
+
+                    $decorTop =
+                        [double]$op.top
+
+                    $decorWidth =
+                        [double]$op.width
+
+                    $decorHeight =
+                        [double]$op.height
+
+
+                    $decorLeft =
+                        [Math]::Max(
+                            0,
+                            [Math]::Min(
+                                $decorLeft,
+                                $slideWidth - 5
+                            )
+                        )
+
+
+                    $decorTop =
+                        [Math]::Max(
+                            0,
+                            [Math]::Min(
+                                $decorTop,
+                                $slideHeight - 5
+                            )
+                        )
+
+
+                    $decorWidth =
+                        [Math]::Max(
+                            5,
+                            [Math]::Min(
+                                $decorWidth,
+                                $slideWidth - $decorLeft
+                            )
+                        )
+
+
+                    $decorHeight =
+                        [Math]::Max(
+                            5,
+                            [Math]::Min(
+                                $decorHeight,
+                                $slideHeight - $decorTop
+                            )
+                        )
+
+
+                    $newShape =
+                        $reflowSlide.Shapes.AddShape(
+                            [int]$shapeTypeCode,
+                            $decorLeft,
+                            $decorTop,
+                            $decorWidth,
+                            $decorHeight
+                        )
+
+
+                    $safeRefName =
+                        [regex]::Replace(
+                            $refId,
+                            '[^A-Za-z0-9_-]',
+                            '_'
+                        )
+
+
+                    try {
+
+                        $newShape.Name =
+                            (
+                                "JUNGLE_REFLOW_DECOR_" +
+                                $safeRefName
+                            )
+                    }
+                    catch {}
+
+
+                    if (
+                        Has-PlanProperty `
+                            $op `
+                            "fill_rgb"
+                    ) {
+
+                        try {
+
+                            $newShape.Fill.Visible =
+                                -1
+
+                            $newShape.Fill.Solid()
+
+                            $newShape.Fill.ForeColor.RGB =
+                                [int]$op.fill_rgb
+
+
+                            if (
+                                Has-PlanProperty `
+                                    $op `
+                                    "fill_transparency"
+                            ) {
+
+                                $decorTransparency =
+                                    [double]$op.fill_transparency
+
+
+                                if (
+                                    $decorTransparency -ge 0 `
+                                    -and
+                                    $decorTransparency -le 1
+                                ) {
+
+                                    $newShape.Fill.Transparency =
+                                        $decorTransparency
+                                }
+                            }
+                        }
+                        catch {}
+                    }
+
+
+                    if (
+                        Has-PlanProperty `
+                            $op `
+                            "line_visible"
+                    ) {
+
+                        if ([bool]$op.line_visible) {
+
+                            $newShape.Line.Visible =
+                                -1
+                        }
+                        else {
+
+                            $newShape.Line.Visible =
+                                0
+                        }
+                    }
+
+
+                    if (
+                        Has-PlanProperty `
+                            $op `
+                            "line_rgb"
+                    ) {
+
+                        try {
+
+                            $newShape.Line.ForeColor.RGB =
+                                [int]$op.line_rgb
+                        }
+                        catch {}
+                    }
+
+
+                    if (
+                        Has-PlanProperty `
+                            $op `
+                            "line_weight"
+                    ) {
+
+                        try {
+
+                            $decorLineWeight =
+                                [double]$op.line_weight
+
+
+                            if (
+                                $decorLineWeight -ge 0.25 `
+                                -and
+                                $decorLineWeight -le 10
+                            ) {
+
+                                $newShape.Line.Weight =
+                                    $decorLineWeight
+                            }
+                        }
+                        catch {}
+                    }
+
+
+                    $createdShapes[$refId] =
+                        [pscustomobject]@{
+
+                            slide_number =
+                                $reflowSlideNumber
+
+                            shape =
+                                $newShape
+                        }
+
+
+                    $applied++
+
+                    continue
+                }
+
+
+                # -------------------------------------------------
+                # Z ORDER
+                # -------------------------------------------------
+
+                if (
+                    $reflowAction -eq
+                    "z_order"
+                ) {
+
+                    $reflowSlide =
+                        $pres.Slides.Item(
+                            $reflowSlideNumber
+                        )
+
+
+                    $zTarget =
+                        $null
+
+
+                    if (
+                        Has-PlanProperty `
+                            $op `
+                            "shape_id"
+                    ) {
+
+                        $zShapeId =
+                            [int]$op.shape_id
+
+
+                        $zTarget =
+                            Get-ShapeById `
+                                -Slide $reflowSlide `
+                                -ShapeId $zShapeId
+                    }
+                    elseif (
+                        Has-PlanProperty `
+                            $op `
+                            "ref_id"
+                    ) {
+
+                        $zRefId =
+                            [string]$op.ref_id
+
+
+                        if (-not (
+                            $createdShapes.ContainsKey(
+                                $zRefId
+                            )
+                        )) {
+
+                            throw (
+                                "Created decorative ref_id not found: " +
+                                $zRefId
+                            )
+                        }
+
+
+                        $createdInfo =
+                            $createdShapes[$zRefId]
+
+
+                        if (
+                            [int]$createdInfo.slide_number -ne
+                            $reflowSlideNumber
+                        ) {
+
+                            throw (
+                                "Decorative ref_id belongs to another slide."
+                            )
+                        }
+
+
+                        $zTarget =
+                            $createdInfo.shape
+                    }
+                    else {
+
+                        throw (
+                            "z_order requires shape_id or ref_id."
+                        )
+                    }
+
+
+                    if ($null -eq $zTarget) {
+
+                        throw (
+                            "Z-order target not found."
+                        )
+                    }
+
+
+                    if (-not (
+                        Has-PlanProperty `
+                            $op `
+                            "z_order"
+                    )) {
+
+                        throw (
+                            "z_order command missing."
+                        )
+                    }
+
+
+                    $zCommand =
+                        (
+                            [string]$op.z_order
+                        ).ToLowerInvariant()
+
+
+                    $zCode =
+                        -1
+
+
+                    switch ($zCommand) {
+
+                        "bring_to_front" {
+
+                            $zCode =
+                                0
+                        }
+
+
+                        "send_to_back" {
+
+                            $zCode =
+                                1
+                        }
+
+
+                        "bring_forward" {
+
+                            $zCode =
+                                2
+                        }
+
+
+                        "send_backward" {
+
+                            $zCode =
+                                3
+                        }
+
+
+                        default {
+
+                            throw (
+                                "Invalid z_order command: " +
+                                $zCommand
+                            )
+                        }
+                    }
+
+
+                    [void]$zTarget.ZOrder(
+                        [int]$zCode
+                    )
+
+
+                    $applied++
+
+                    continue
+                }
+
+
+                # -------------------------------------------------
+                # DELETE CREATED
+                #
+                # Original presentation shapes are unreachable
+                # from this delete path.
+                # -------------------------------------------------
+
+                if (
+                    $reflowAction -eq
+                    "delete_created"
+                ) {
+
+                    if (-not (
+                        Has-PlanProperty `
+                            $op `
+                            "ref_id"
+                    )) {
+
+                        throw (
+                            "delete_created requires ref_id."
+                        )
+                    }
+
+
+                    $deleteRefId =
+                        [string]$op.ref_id
+
+
+                    if (-not (
+                        $createdShapes.ContainsKey(
+                            $deleteRefId
+                        )
+                    )) {
+
+                        throw (
+                            "delete_created may target only a decorative shape created earlier in this run."
+                        )
+                    }
+
+
+                    $deleteInfo =
+                        $createdShapes[$deleteRefId]
+
+
+                    if (
+                        [int]$deleteInfo.slide_number -ne
+                        $reflowSlideNumber
+                    ) {
+
+                        throw (
+                            "delete_created slide mismatch."
+                        )
+                    }
+
+
+                    $deleteInfo.shape.Delete()
+
+
+                    [void]$createdShapes.Remove(
+                        $deleteRefId
+                    )
+
+
+                    $applied++
+
+                    continue
+                }
+
+
+                # -------------------------------------------------
+                # MODIFY EXISTING
+                #
+                # Falls through into proven SAFE executor logic.
+                # -------------------------------------------------
+
+                if (
+                    $reflowAction -ne
+                    "modify_existing"
+                ) {
+
+                    throw (
+                        "Unsupported REFLOW action: " +
+                        $reflowAction
+                    )
+                }
+
+
+            $slideNumber =
+                [int]$op.slide_number
+
+            $shapeId =
+                [int]$op.shape_id
+
+
+            if (
+                $slideNumber -lt 1 `
+                -or $slideNumber -gt $analysisCount
+            ) {
+
+                throw "Invalid slide number"
+            }
+
+
+            $slide =
+                $pres.Slides.Item(
+                    $slideNumber
+                )
+
+
+            $shape =
+                Get-ShapeById `
+                    -Slide $slide `
+                    -ShapeId $shapeId
+
+
+            if ($null -eq $shape) {
+
+                throw "Shape ID not found"
+            }
+
+
+            # ------------------------------------------------
+            # Geometry
+            # ------------------------------------------------
+
+            $newLeft =
+                [double]$shape.Left
+
+            $newTop =
+                [double]$shape.Top
+
+            $newWidth =
+                [double]$shape.Width
+
+            $newHeight =
+                [double]$shape.Height
+
+
+            if (Has-PlanProperty $op "left") {
+
+                $newLeft =
+                    [double]$op.left
+            }
+
+            if (Has-PlanProperty $op "top") {
+
+                $newTop =
+                    [double]$op.top
+            }
+
+            if (Has-PlanProperty $op "width") {
+
+                $newWidth =
+                    [double]$op.width
+            }
+
+            if (Has-PlanProperty $op "height") {
+
+                $newHeight =
+                    [double]$op.height
+            }
+
+
+            $newWidth =
+                [Math]::Max(
+                    5,
+                    [Math]::Min(
+                        $newWidth,
+                        $slideWidth
+                    )
+                )
+
+            $newHeight =
+                [Math]::Max(
+                    5,
+                    [Math]::Min(
+                        $newHeight,
+                        $slideHeight
+                    )
+                )
+
+            $newLeft =
+                [Math]::Max(
+                    0,
+                    [Math]::Min(
+                        $newLeft,
+                        $slideWidth - $newWidth
+                    )
+                )
+
+            $newTop =
+                [Math]::Max(
+                    0,
+                    [Math]::Min(
+                        $newTop,
+                        $slideHeight - $newHeight
+                    )
+                )
+
+
+            if (Has-PlanProperty $op "left") {
+                $shape.Left = $newLeft
+            }
+
+            if (Has-PlanProperty $op "top") {
+                $shape.Top = $newTop
+            }
+
+            if (Has-PlanProperty $op "width") {
+                $shape.Width = $newWidth
+            }
+
+            if (Has-PlanProperty $op "height") {
+                $shape.Height = $newHeight
+            }
+
+
+            # ------------------------------------------------
+            # Text style
+            # ------------------------------------------------
+
+            if (
+                $shape.HasTextFrame -eq -1 `
+                -and $shape.TextFrame.HasText -eq -1
+            ) {
+
+                $tr =
+                    $shape.TextFrame.TextRange
+
+
+                if (Has-PlanProperty $op "font_size") {
+
+                    $fontSize =
+                        [double]$op.font_size
+
+                    if (
+                        $fontSize -ge 7 `
+                        -and $fontSize -le 72
+                    ) {
+
+                        $tr.Font.Size =
+                            $fontSize
+                    }
+                }
+
+
+                if (Has-PlanProperty $op "font_bold") {
+
+                    if ([bool]$op.font_bold) {
+
+                        $tr.Font.Bold =
+                            -1
+                    }
+                    else {
+
+                        $tr.Font.Bold =
+                            0
+                    }
+                }
+
+
+                if (Has-PlanProperty $op "font_rgb") {
+
+                    $tr.Font.Color.RGB =
+                        [int]$op.font_rgb
+                }
+
+
+                if (Has-PlanProperty $op "alignment") {
+
+                    $alignment =
+                        [int]$op.alignment
+
+                    if (
+                        $alignment -ge 1 `
+                        -and $alignment -le 4
+                    ) {
+
+                        $tr.ParagraphFormat.Alignment =
+                            $alignment
+                    }
+                }
+
+
+                if (Has-PlanProperty $op "margin_left") {
+
+                    $shape.TextFrame.MarginLeft =
+                        [double]$op.margin_left
+                }
+
+                if (Has-PlanProperty $op "margin_right") {
+
+                    $shape.TextFrame.MarginRight =
+                        [double]$op.margin_right
+                }
+
+                if (Has-PlanProperty $op "margin_top") {
+
+                    $shape.TextFrame.MarginTop =
+                        [double]$op.margin_top
+                }
+
+                if (Has-PlanProperty $op "margin_bottom") {
+
+                    $shape.TextFrame.MarginBottom =
+                        [double]$op.margin_bottom
+                }
+            }
+
+
+            # ------------------------------------------------
+            # Fill style
+            # ------------------------------------------------
+
+            if (Has-PlanProperty $op "fill_rgb") {
+
+                try {
+
+                    $shape.Fill.Visible =
+                        -1
+
+                    $shape.Fill.Solid()
+
+                    $shape.Fill.ForeColor.RGB =
+                        [int]$op.fill_rgb
+
+                    if (Has-PlanProperty $op "fill_transparency") {
+
+                        $transparency =
+                            [double]$op.fill_transparency
+
+                        if (
+                            $transparency -ge 0 `
+                            -and $transparency -le 1
+                        ) {
+
+                            $shape.Fill.Transparency =
+                                $transparency
+                        }
+                    }
+                }
+                catch {}
+            }
+
+
+            # ------------------------------------------------
+            # Line style
+            # ------------------------------------------------
+
+            if (Has-PlanProperty $op "line_visible") {
+
+                if ([bool]$op.line_visible) {
+
+                    $shape.Line.Visible =
+                        -1
+                }
+                else {
+
+                    $shape.Line.Visible =
+                        0
+                }
+            }
+
+
+            if (Has-PlanProperty $op "line_rgb") {
+
+                try {
+
+                    $shape.Line.ForeColor.RGB =
+                        [int]$op.line_rgb
+                }
+                catch {}
+            }
+
+
+            if (Has-PlanProperty $op "line_weight") {
+
+                try {
+
+                    $weight =
+                        [double]$op.line_weight
+
+                    if (
+                        $weight -ge 0.25 `
+                        -and $weight -le 10
+                    ) {
+
+                        $shape.Line.Weight =
+                            $weight
+                    }
+                }
+                catch {}
+            }
+
+
+            $applied++
+        }
+        catch {
+
+            $failed +=
+                (
+                    "Slide {0} / Shape {1} : {2}" `
+                    -f `
+                    $op.slide_number,
+                    $op.shape_id,
+                    $_.Exception.Message
+                )
+        }
+    }
+
+
+    $pres.Save()
+}
+finally {
+
+    if ($null -ne $pres) {
+
+        try {
+            $pres.Close()
+        }
+        catch {}
+
+        Release-ComObjectSafe $pres
+    }
+
+    if ($null -ne $ppt) {
+
+        try {
+            $ppt.Quit()
+        }
+        catch {}
+
+        Release-ComObjectSafe $ppt
+    }
+
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+}
+
+
+# ============================================================
+    # ============================================================
+    # JUNGLE_SMART_REFLOW_EXECUTOR_FAIL_CLOSED_V1
+    # ============================================================
+
+    if ($failed.Count -gt 0) {
+
+        if (
+            Test-Path `
+                -LiteralPath $outputPath `
+                -PathType Leaf
+        ) {
+
+            Remove-Item `
+                -LiteralPath $outputPath `
+                -Force
+        }
+
+
+        throw (
+            "REFLOW apply failed closed. Failed operations=" +
+            $failed.Count +
+            " Details=" +
+            (
+                $failed -join
+                " | "
+            )
+        )
+    }
+
+
+    # ============================================================
+    # JUNGLE_SMART_REFLOW_EXECUTOR_MUTATION_GUARD_V1
+    # ============================================================
+
+    try {
+
+        $mutationBoundaryResult =
+            Assert-JungleReflowMutationBoundary `
+                -SourcePath $FilePath `
+                -ArtifactPath $outputPath `
+                -SourceHashBefore $sourceHashBefore
+    }
+    catch {
+
+        if (
+            Test-Path `
+                -LiteralPath $outputPath `
+                -PathType Leaf
+        ) {
+
+            Remove-Item `
+                -LiteralPath $outputPath `
+                -Force
+        }
+
+
+        throw (
+            "REFLOW Mutation Boundary rejected artifact: " +
+            $_.Exception.Message
+        )
+    }
+
+
+    if (-not [bool]$mutationBoundaryResult.passed) {
+
+        if (
+            Test-Path `
+                -LiteralPath $outputPath `
+                -PathType Leaf
+        ) {
+
+            Remove-Item `
+                -LiteralPath $outputPath `
+                -Force
+        }
+
+
+        throw (
+            "REFLOW Mutation Boundary returned non-pass result."
+        )
+    }
+
+# 7. Validate output
+# ============================================================
+
+if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+
+    throw "Visual PPTX was not created."
+}
+
+
+$outputInfo =
+    Get-Item -LiteralPath $outputPath
+
+
+if ($outputInfo.Length -lt 10000) {
+
+    throw "Generated PPTX is unexpectedly small."
+}
+
+
+Write-Host ""
+Write-Host "========================================"
+Write-Host " JUNGLE PPT VISUAL MODIFY RESULT"
+Write-Host "========================================"
+Write-Host ""
+
+Write-Host "REFLOW Modify : OK"
+Write-Host "Slides total  :" $slideCount
+Write-Host "Slides edited :" $analysisCount
+Write-Host "Operations    :" $allOperations.Count
+Write-Host "Applied       :" $applied
+Write-Host "Failed        :" $failed.Count
+Write-Host "Original      :" $FilePath
+Write-Host "File          :" $outputPath
+Write-Host "Size          :" $outputInfo.Length
+Write-Host "Plan          :" $combinedPlanPath
+
+if ($failed.Count -gt 0) {
+
+    Write-Host ""
+    Write-Host "Failed operations:"
+
+    foreach ($item in $failed) {
+
+        Write-Host " -" $item
+    }
+}
+
+
+if ($failed.Count -eq 0) {
+
+    Write-Host ""
+    Write-Host "STATUS: PPT_REFLOW_MODIFY_COMPLETE"
+}
+else {
+
+    Write-Host ""
+    Write-Host "STATUS: PPT_REFLOW_MODIFY_PARTIAL"
+}

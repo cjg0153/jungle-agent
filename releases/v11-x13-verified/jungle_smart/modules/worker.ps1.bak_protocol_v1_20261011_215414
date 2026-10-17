@@ -1,0 +1,250 @@
+﻿# JUNGLE_SMART_WORKER_PROTOCOL_V1
+
+function Write-JunglePptSafeWorkerInput {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Request,
+
+        [Parameter(Mandatory=$true)]
+        [string]$ConfigPath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$OutputPath
+    )
+
+
+    $record =
+        [ordered]@{
+
+            protocol =
+                "JUNGLE_SMART_PPT_SAFE_WORKER_V1"
+
+            request =
+                $Request
+
+            config_path =
+                $ConfigPath
+
+            created_at =
+                (Get-Date).ToString("s")
+        }
+
+
+    $json =
+        $record |
+        ConvertTo-Json -Depth 5
+
+
+    $encoding =
+        New-Object System.Text.UTF8Encoding(
+            $false
+        )
+
+
+    [System.IO.File]::WriteAllText(
+        $OutputPath,
+        $json,
+        $encoding
+    )
+
+
+    return $OutputPath
+}
+
+
+function Invoke-JunglePptSafeWorker {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Root,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Request,
+
+        [Parameter(Mandatory=$true)]
+        [string]$ConfigPath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$RunDirectory,
+
+        [Parameter(Mandatory=$true)]
+        [int]$TimeoutSeconds,
+
+        [int]$PollMilliseconds = 200
+    )
+
+
+    $workerScript =
+        Join-Path `
+            $Root `
+            "executors\ppt_safe_worker.ps1"
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $workerScript `
+            -PathType Leaf
+    )) {
+
+        throw "PPT SAFE worker script missing: $workerScript"
+    }
+
+
+    $powershellExe =
+        Join-Path `
+            $PSHOME `
+            "powershell.exe"
+
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $powershellExe `
+            -PathType Leaf
+    )) {
+
+        throw "Windows PowerShell missing: $powershellExe"
+    }
+
+
+    New-Item `
+        -ItemType Directory `
+        -Path $RunDirectory `
+        -Force |
+    Out-Null
+
+
+    $inputPath =
+        Join-Path `
+            $RunDirectory `
+            "worker_input.json"
+
+
+    Write-JunglePptSafeWorkerInput `
+        -Request $Request `
+        -ConfigPath $ConfigPath `
+        -OutputPath $inputPath |
+    Out-Null
+
+
+    $processDir =
+        Join-Path `
+            $RunDirectory `
+            "process"
+
+
+    $result =
+        Invoke-JungleProcessWithWatchdog `
+            -FilePath $powershellExe `
+            -Arguments @(
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                $workerScript,
+                "-InputPath",
+                $inputPath
+            ) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -WorkDirectory $processDir `
+            -PollMilliseconds $PollMilliseconds
+
+
+    $stdout =
+        ""
+
+
+    if (
+        Test-Path `
+            -LiteralPath $result.stdout_path `
+            -PathType Leaf
+    ) {
+
+        $stdout =
+            [System.IO.File]::ReadAllText(
+                $result.stdout_path
+            )
+    }
+
+
+    $stderr =
+        ""
+
+
+    if (
+        Test-Path `
+            -LiteralPath $result.stderr_path `
+            -PathType Leaf
+    ) {
+
+        $stderr =
+            [System.IO.File]::ReadAllText(
+                $result.stderr_path
+            )
+    }
+
+
+    return [pscustomobject]@{
+
+        started =
+            $result.started
+
+        process_id =
+            $result.process_id
+
+        completed =
+            $result.completed
+
+        timed_out =
+            $result.timed_out
+
+        killed =
+            $result.killed
+
+        exit_code =
+            $result.exit_code
+
+        duration_ms =
+            $result.duration_ms
+
+        input_path =
+            $inputPath
+
+        stdout_path =
+            $result.stdout_path
+
+        stderr_path =
+            $result.stderr_path
+
+        stdout =
+            $stdout
+
+        stderr =
+            $stderr
+    }
+}
+
+
+function Get-JungleWorkerStatus {
+
+    return [pscustomobject]@{
+
+        enabled =
+            $true
+
+        version =
+            "V1"
+
+        protocol =
+            "JUNGLE_SMART_PPT_SAFE_WORKER_V1"
+
+        isolation =
+            "PROCESS"
+
+        watchdog_enforced =
+            $true
+
+        status =
+            "READY"
+    }
+}

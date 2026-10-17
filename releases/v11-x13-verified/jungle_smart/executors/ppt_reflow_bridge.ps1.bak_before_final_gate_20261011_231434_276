@@ -1,0 +1,452 @@
+﻿param(
+    [Parameter(Mandatory=$true)]
+    [string]$Request,
+
+    [Parameter(Mandatory=$true)]
+    [string]$ConfigPath,
+
+    [switch]$DryRun,
+
+    [int]$TimeoutSeconds = 60
+)
+
+$ErrorActionPreference =
+    "Stop"
+
+
+# ================================================================
+# JUNGLE_SMART_PPT_REFLOW_BRIDGE_V2
+#
+# JUNGLE_SMART_REFLOW_WORKER_PROTOCOL_V1
+# JUNGLE_SMART_REFLOW_BRIDGE_ISOLATION_V1
+#
+# Bridge -> isolated PowerShell worker.
+#
+# Live execution remains blocked by Worker until Hard Gate wiring.
+# ================================================================
+
+
+function Get-JungleBridgeStringSha256 {
+
+    param(
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+
+    $encoding =
+        New-Object System.Text.UTF8Encoding(
+            $false
+        )
+
+
+    $bytes =
+        $encoding.GetBytes(
+            $Text
+        )
+
+
+    $sha =
+        [System.Security.Cryptography.SHA256]::Create()
+
+
+    try {
+
+        $hashBytes =
+            $sha.ComputeHash(
+                $bytes
+            )
+    }
+    finally {
+
+        $sha.Dispose()
+    }
+
+
+    return (
+        -join (
+            $hashBytes |
+            ForEach-Object {
+
+                $_.ToString("x2")
+            }
+        )
+    ).ToUpperInvariant()
+}
+
+
+# ================================================================
+# 1. ROOT / CONFIG
+# ================================================================
+
+$root =
+    Split-Path `
+        -Parent (
+            Split-Path `
+                -Parent $MyInvocation.MyCommand.Path
+        )
+
+
+$config =
+    Get-Content `
+        -LiteralPath $ConfigPath `
+        -Raw |
+    ConvertFrom-Json
+
+
+if (-not $config.feature_flags.reflow_v1) {
+
+    throw (
+        "REFLOW V1 execution is disabled by feature flag."
+    )
+}
+
+
+# ================================================================
+# 2. PATHS
+# ================================================================
+
+$workerPath =
+    Join-Path `
+        $root `
+        "executors\ppt_reflow_worker.ps1"
+
+
+$executorPath =
+    Join-Path `
+        $root `
+        "executors\run_pptx_reflow_v1.ps1"
+
+
+$guardPath =
+    Join-Path `
+        $root `
+        "modules\reflow_guard.ps1"
+
+
+foreach ($file in @(
+    $workerPath,
+    $executorPath,
+    $guardPath
+)) {
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $file `
+            -PathType Leaf
+    )) {
+
+        throw (
+            "REFLOW integration dependency missing: " +
+            $file
+        )
+    }
+}
+
+
+# ================================================================
+# 3. ISOLATED RUN DIRECTORY
+# ================================================================
+
+$stamp =
+    Get-Date -Format "yyyyMMdd_HHmmss_fff"
+
+
+$runId =
+    (
+        "reflow_worker_" +
+        $stamp +
+        "_" +
+        [guid]::NewGuid().ToString("N").Substring(0, 8)
+    )
+
+
+$runDirectory =
+    Join-Path `
+        (
+            Join-Path `
+                $root `
+                "runs"
+        ) `
+        $runId
+
+
+New-Item `
+    -ItemType Directory `
+    -Path $runDirectory `
+    -Force |
+Out-Null
+
+
+$inputPath =
+    Join-Path `
+        $runDirectory `
+        "worker_input.json"
+
+
+$resultPath =
+    Join-Path `
+        $runDirectory `
+        "worker_result.json"
+
+
+$stdoutPath =
+    Join-Path `
+        $runDirectory `
+        "worker_stdout.log"
+
+
+$stderrPath =
+    Join-Path `
+        $runDirectory `
+        "worker_stderr.log"
+
+
+# ================================================================
+# 4. INPUT PROTOCOL
+# ================================================================
+
+$requestHash =
+    Get-JungleBridgeStringSha256 `
+        -Text $Request
+
+
+$inputObject =
+    [ordered]@{
+
+        protocol =
+            "JUNGLE_SMART_REFLOW_WORKER_PROTOCOL_V1"
+
+        request =
+            $Request
+
+        request_sha256 =
+            $requestHash
+
+        config_path =
+            $ConfigPath
+
+        executor_path =
+            $executorPath
+
+        guard_path =
+            $guardPath
+
+        result_path =
+            $resultPath
+
+        dry_run =
+            [bool]$DryRun
+    }
+
+
+$inputJson =
+    $inputObject |
+    ConvertTo-Json -Depth 10
+
+
+# Worker transport is deliberately UTF-8 BOM.
+
+$utf8Bom =
+    New-Object System.Text.UTF8Encoding(
+        $true
+    )
+
+
+[System.IO.File]::WriteAllText(
+    $inputPath,
+    $inputJson,
+    $utf8Bom
+)
+
+
+# ================================================================
+# 5. START ISOLATED WORKER
+# ================================================================
+
+$powerShellExe =
+    (
+        Get-Command `
+            "powershell.exe" `
+            -ErrorAction Stop
+    ).Source
+
+
+$process =
+    Start-Process `
+        -FilePath $powerShellExe `
+        -ArgumentList @(
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            $workerPath,
+            "-InputJsonPath",
+            $inputPath
+        ) `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+
+
+$deadline =
+    (Get-Date).AddSeconds(
+        $TimeoutSeconds
+    )
+
+
+while (-not $process.HasExited) {
+
+    if ((Get-Date) -gt $deadline) {
+
+        try {
+
+            $process.Kill()
+        }
+        catch {}
+
+
+        throw (
+            "REFLOW worker timeout after " +
+            $TimeoutSeconds +
+            " seconds."
+        )
+    }
+
+
+    Start-Sleep `
+        -Milliseconds 200
+
+
+    $process.Refresh()
+}
+
+
+$exitCode =
+    [int]$process.ExitCode
+
+
+# ================================================================
+# 6. EXPLICIT RESULT
+# ================================================================
+
+if (-not (
+    Test-Path `
+        -LiteralPath $resultPath `
+        -PathType Leaf
+)) {
+
+    $stderrText =
+        ""
+
+
+    if (
+        Test-Path `
+            -LiteralPath $stderrPath `
+            -PathType Leaf
+    ) {
+
+        $stderrText =
+            [System.IO.File]::ReadAllText(
+                $stderrPath
+            )
+    }
+
+
+    throw (
+        "REFLOW worker did not create worker_result.json. ExitCode=" +
+        $exitCode +
+        " STDERR=" +
+        $stderrText
+    )
+}
+
+
+$result =
+    Get-Content `
+        -LiteralPath $resultPath `
+        -Raw |
+    ConvertFrom-Json
+
+
+if (
+    [string]$result.protocol -ne
+    "JUNGLE_SMART_REFLOW_WORKER_RESULT_V1"
+) {
+
+    throw (
+        "Invalid REFLOW worker result protocol."
+    )
+}
+
+
+# ================================================================
+# 7. DRY-RUN ACCEPTANCE
+# ================================================================
+
+if ($DryRun) {
+
+    if (
+        [string]$result.status -ne
+        "REFLOW_DRY_RUN_READY"
+    ) {
+
+        throw (
+            "REFLOW dry-run failed. Status=" +
+            [string]$result.status
+        )
+    }
+
+
+    if (-not [bool]$result.accepted) {
+
+        throw (
+            "REFLOW dry-run result not accepted."
+        )
+    }
+
+
+    if ([bool]$result.executor_called) {
+
+        throw (
+            "REFLOW executor was unexpectedly called during dry-run."
+        )
+    }
+
+
+    Write-Host ""
+    Write-Host "========================================"
+    Write-Host " JUNGLE REFLOW BRIDGE DRY RUN"
+    Write-Host "========================================"
+    Write-Host ""
+
+    Write-Host "Worker status       : $($result.status)"
+    Write-Host "Worker exit code    : $exitCode"
+    Write-Host "Executor called     : $($result.executor_called)"
+    Write-Host "AI calls            : $($result.ai_calls)"
+    Write-Host "COM calls           : $($result.com_calls)"
+    Write-Host "Mutation Boundary   : $($result.mutation_boundary)"
+    Write-Host "Hard Gate           : $($result.hard_gate)"
+    Write-Host "Source              : $($result.source_path)"
+    Write-Host "Run directory       : $runDirectory"
+    Write-Host ""
+    Write-Host "STATUS : JUNGLE_REFLOW_BRIDGE_DRY_RUN_PASS"
+    Write-Host ""
+
+    return
+}
+
+
+# ================================================================
+# 8. LIVE PATH
+#
+# Worker must refuse until Hard Gate integration is installed.
+# ================================================================
+
+throw (
+    "Live REFLOW is not activated. Worker status=" +
+    [string]$result.status +
+    " HardGate=" +
+    [string]$result.hard_gate
+)
